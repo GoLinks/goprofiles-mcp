@@ -1,4 +1,4 @@
-# GoLinks MCP Server
+# GoProfiles MCP Server
 
 An MCP server that exposes [GoProfiles](https://www.goprofiles.io) as tools for AI assistants. Built with [FastMCP](https://gofastmcp.com).
 
