@@ -22,19 +22,18 @@ http://localhost:8000/mcp
 
 The hosted server does not use a shared `GOPROFILES_API_TOKEN`.
 
-MCP clients should send a per-user GoLinks OAuth/API bearer token with each request:
+MCP clients should send a per-user GoProfiles OAuth/API bearer token with each request:
 
 ```http
 Authorization: Bearer YOUR_TOKEN
 ```
 
-The MCP server forwards that header to `api.goprofiles.io`. GoLinks remains responsible for token validation, scope enforcement, refresh, storage, and revocation.
+The MCP server forwards that header to `api.goprofiles.io`. GoProfiles remains responsible for token validation, scope enforcement, refresh, storage, and revocation.
 
 An OAuth client must be pre-registered in your GoProfiles workspace with:
 
-- Allowed scopes: 
+- Allowed scopes: *(define when tools are added)*
 - Redirect URIs: the exact callback URL(s) your MCP client uses
-
 
 ## Local Development
 
@@ -78,7 +77,8 @@ docker run --rm -p 8000:8000 goprofiles-mcp
 
 ## Tools
 
-| Tool             | Description                                | Scope           |
-| ---------------- | ------------------------------------------ | --------------- |
-| `EX_TOOL`   | `EX_DESC`     | `EX_SCOPE`  |
+No tools are registered yet. Add modules under `src/goprofiles_mcp/tools/` and register them in `src/goprofiles_mcp/server.py`.
 
+| Tool | Description | Scope |
+| ---- | ----------- | ----- |
+| —    | —           | —     |
