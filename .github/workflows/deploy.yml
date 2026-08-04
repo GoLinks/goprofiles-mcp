@@ -1,0 +1,59 @@
+name: Build and deploy MCP
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # required for GitHub OIDC → AWS
+
+env:
+  IMAGE_NAME: ghcr.io/golinks/goprofiles-mcp
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: goprofiles-mcp
+  ECS_SERVICE: goprofiles-mcp
+
+jobs:
+  deploy:
+    name: Build, push, and redeploy ECS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::999284314649:role/goprofiles-mcp-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force ECS redeploy
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --force-new-deployment \
+            --region "$AWS_REGION"
