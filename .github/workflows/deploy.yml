@@ -44,11 +44,22 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
 
+      - name: Debug OIDC claims
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r .value)
+          echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' \
+            | awk '{printf "%s", $0; n=length%4; if(n) printf "%s", substr("====",1,4-n); print ""}' \
+            | base64 -d 2>/dev/null \
+            | jq '{sub, aud, iss, repository, ref, repository_owner, job_workflow_ref}'
+
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::999284314649:role/goprofiles-mcp-github-deploy
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Force ECS redeploy
         run: |
