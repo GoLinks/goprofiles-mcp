@@ -25,7 +25,11 @@ def main() -> None:
     # search_people is read-only and uses no progress/sampling/subscriptions, so
     # there is no reason to keep per-connection state. Escape hatch in case a
     # future tool needs server->client push.
-    stateless = os.environ.get("MCP_STATELESS", "true").lower() != "false"
+    #
+    # TEMPORARY (revert me): default flipped to stateful to confirm in prod that
+    # ChatGPT's 502 is really the 400/404 above. Once confirmed, restore the
+    # default to "true" — stateless is the correct mode for this server.
+    stateless = os.environ.get("MCP_STATELESS", "false").lower() == "true"
 
     asyncio.run(
         mcp.run_http_async(
