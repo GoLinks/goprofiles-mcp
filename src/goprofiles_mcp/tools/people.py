@@ -66,7 +66,6 @@ class PeopleSearchResponse(BaseModel):
 
 _USER_SCALAR_FIELDS = frozenset(
     {
-        "uid",
         "first_name",
         "last_name",
         "username",
@@ -131,7 +130,6 @@ class ProfileLanguage(BaseModel):
 
 
 class Profile(BaseModel):
-    uid: int = 0
     first_name: str = ""
     last_name: str = ""
     username: str = ""
@@ -185,8 +183,8 @@ def _full_name(p: PersonResult) -> str:
 
 
 def _format_person(p: PersonResult, *, show: set[str], show_match: bool) -> str:
+    # Omit uid — agents use username with get_profile; don't leak internal ids.
     lines = [
-        f"UID:        {p.uid}",
         f"Name:       {_full_name(p)}",
         f"Username:   {p.username or 'Unknown'}",
         f"Title:      {p.title or 'Unknown'}",
@@ -285,7 +283,6 @@ def _normalize_profile(
     ]
 
     return Profile(
-        uid=int(user.get("uid") or 0),
         first_name=str(user.get("first_name") or ""),
         last_name=str(user.get("last_name") or ""),
         username=str(user.get("username") or ""),
@@ -344,8 +341,9 @@ def _format_profile(p: Profile) -> str:
     else:
         certifications = "None"
 
+    # Omit uid from the agent-facing text — the caller already supplied it, and
+    # echoing the internal id into chat responses isn't useful for end users.
     lines = [
-        f"UID:           {p.uid}",
         f"Name:          {name}",
         f"Username:      {p.username or 'Unknown'}",
         f"Title:         {p.title or 'Unknown'}",
@@ -498,14 +496,14 @@ async def search_people(
 ) -> str:
     """Search and filter people in the user's GoProfiles directory
     (https://www.goprofiles.io) by name, department, title, location, language,
-    skill, interest, and group. Returns each person's numeric 'uid' along with
-    their title, department, and location.
+    skill, interest, and group. Returns each person's username along with their
+    title, department, and location.
 
-    This is the name-to-uid resolution step: call it first whenever another tool
-    needs a 'uid' and you only have a name. Pass the name to 'names', then pick
-    the uid from the results — use title/department/location to disambiguate when
-    several people match, and ask the user which one they meant rather than
-    guessing between two plausible matches.
+    This is the name-to-username resolution step: call it first whenever another
+    tool needs a 'username' and you only have a name. Pass the name to 'names',
+    then pick the username from the results — use title/department/location to
+    disambiguate when several people match, and ask the user which one they meant
+    rather than guessing between two plausible matches.
 
     Name matching is substring-based, not fuzzy, so pass several spelling and
     shortening variants in 'names' at once. Results are ranked best-first and each
@@ -588,25 +586,25 @@ async def search_people(
     if names and len(data.results) > 1:
         footer = (
             "\n\nMultiple people matched. Use title/department/location to pick the "
-            "right uid, and confirm with the user if the match is ambiguous."
+            "right username, and confirm with the user if the match is ambiguous."
         )
     return header + "\n\n".join(entries) + footer
 
 
 async def get_profile(
-    uid: Annotated[
-        int,
+    username: Annotated[
+        str,
         Field(
             description=(
-                "Numeric user id of the person whose profile to fetch. Resolve this "
-                "with search_people first when you only have a name."
+                "GoProfiles username of the person whose profile to fetch. Resolve "
+                "this with search_people first when you only have a name."
             ),
-            ge=1,
+            min_length=1,
         ),
     ],
     ctx: Context | None = None,
 ) -> str:
-    """Get a specific person's full GoProfiles profile by uid
+    """Get a specific person's full GoProfiles profile by username
     (https://www.goprofiles.io).
 
     Combines users.php, certifications.php, and languages.php into one normalized
@@ -614,16 +612,20 @@ async def get_profile(
     and contact info. Only an explicit allow-list of profile fields is returned —
     other fields from the underlying endpoints are stripped.
 
-    Use after search_people when you need the full profile for a resolved uid.
+    Use after search_people when you need the full profile for a resolved username.
     Read-only. Requires profiles:read scope.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
 
-    not_found = f"No profile found for uid {uid}. Confirm the uid from search_people and try again."
+    username = username.strip()
+    not_found = (
+        f"No profile found for username '{username}'. Confirm the username from "
+        "search_people and try again."
+    )
 
-    user_params = external_params({"uid": uid}, tool="get_profile")
+    user_params = external_params({"username": username}, tool="get_profile")
     try:
         user_response = await _api_get(
             "/users.php",
@@ -637,6 +639,9 @@ async def get_profile(
     user_raw = user_response.json()
     if not isinstance(user_raw, dict) or not user_raw.get("uid"):
         return not_found
+
+    # Certifications/languages APIs key off uid; keep that internal — never surface it.
+    uid = int(user_raw["uid"])
 
     cert_params = external_params(
         {"uid": uid, "forProfile": "true"}, tool="get_profile"
