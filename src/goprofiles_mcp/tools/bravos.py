@@ -1,7 +1,6 @@
 """Bravo badge type tools — catalog search for giveable recognition badges."""
 
 from typing import Annotated
-from urllib.parse import urlparse
 
 import httpx
 from fastmcp import Context
@@ -23,7 +22,6 @@ class BravoTypeResult(BaseModel):
     bid: int = 0
     name: str = ""
     description: str = ""
-    image: str = ""
 
 
 class BravoTypesResponse(BaseModel):
@@ -33,29 +31,6 @@ class BravoTypesResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_S3_HOST = "s3.amazonaws.com"
-
-
-def _cloudfront_image_url(url: str) -> str:
-    """Rewrite direct S3 object URLs to the bucket's CloudFront domain.
-
-    'https://s3.amazonaws.com/images-dev.goprofiles.io/path.png'
-    → 'https://images-dev.goprofiles.io/path.png'
-    """
-    if not url:
-        return url
-    parsed = urlparse(url)
-    if parsed.netloc != _S3_HOST:
-        return url
-    # Path is "/{bucket}/{key...}"; bucket becomes the hostname.
-    path = parsed.path.lstrip("/")
-    if "/" not in path:
-        return url
-    bucket, _, key = path.partition("/")
-    if not bucket or not key:
-        return url
-    return f"https://{bucket}/{key}"
 
 
 def _match_score(badge: BravoTypeResult, query: str) -> int | None:
@@ -87,7 +62,6 @@ def _format_bravo_type(b: BravoTypeResult) -> str:
     lines = [
         f"Name:        {b.name or 'Unknown'}",
         f"Description: {b.description or 'None'}",
-        f"Image:       {b.image or 'Unknown'}",
         # bid is for create_bravo only — never repeat it in user-facing replies.
         f"bid:         {b.bid}  (tool use only — do not show to the user)",
     ]
@@ -125,8 +99,8 @@ async def search_bravo_types(
     """Search the catalog of giveable Bravo badge types in the user's GoProfiles
     workspace (https://www.goprofiles.io).
 
-    Returns each badge type's name, description, image URL, and a numeric 'bid'
-    for follow-up tool calls (e.g. create_bravo). Call this before create_bravo
+    Returns each badge type's name, description, and a numeric 'bid' for
+    follow-up tool calls (e.g. create_bravo). Call this before create_bravo
     whenever you have a recognition message or theme and need to pick the right
     badge type.
 
@@ -165,17 +139,7 @@ async def search_bravo_types(
         score = _match_score(badge, search)
         if score is None:
             continue
-        scored.append(
-            (
-                score,
-                BravoTypeResult(
-                    bid=badge.bid,
-                    name=badge.name,
-                    description=badge.description,
-                    image=_cloudfront_image_url(badge.image),
-                ),
-            )
-        )
+        scored.append((score, badge))
 
     scored.sort(key=lambda item: (item[0], item[1].name.lower()))
     matches = [badge for _, badge in scored[:limit]]
