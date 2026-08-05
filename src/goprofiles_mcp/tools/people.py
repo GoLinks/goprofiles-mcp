@@ -167,11 +167,15 @@ async def search_people(
     ] = None,
     skills: Annotated[
         list[str] | None,
-        Field(description="Exact skill names to filter by, e.g. ['Python', 'Kubernetes']."),
+        Field(
+            description="Exact skill names to filter by, e.g. ['Python', 'Kubernetes']."
+        ),
     ] = None,
     interests: Annotated[
         list[str] | None,
-        Field(description="Exact interest names to filter by, e.g. ['Hiking', 'Cooking']."),
+        Field(
+            description="Exact interest names to filter by, e.g. ['Hiking', 'Cooking']."
+        ),
     ] = None,
     languages: Annotated[
         list[str] | None,
@@ -184,7 +188,9 @@ async def search_people(
     ] = None,
     groups: Annotated[
         list[str] | None,
-        Field(description="Exact group names to filter by, e.g. ['Onboarding Buddies']."),
+        Field(
+            description="Exact group names to filter by, e.g. ['Onboarding Buddies']."
+        ),
     ] = None,
     limit: Annotated[
         int, Field(description="Number of people to return (1–100).", ge=1, le=100)
@@ -201,7 +207,9 @@ async def search_people(
     ] = None,
     order: Annotated[
         SortOrder | None,
-        Field(description="Sort direction: 'asc' or 'desc'. Only applies when sort='hired_at'."),
+        Field(
+            description="Sort direction: 'asc' or 'desc'. Only applies when sort='hired_at'."
+        ),
     ] = None,
     ctx: Context | None = None,
 ) -> str:

@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-from starlette.middleware import Middleware  # noqa: E402
+from starlette.middleware import Middleware
 
-from goprofiles_mcp.server import RequireBearerOnMCP, mcp  # noqa: E402
+from goprofiles_mcp.server import RequireBearerOnMCP, mcp
 
 
 def main() -> None:

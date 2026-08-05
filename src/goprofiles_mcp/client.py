@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
@@ -63,7 +63,7 @@ def format_timestamp(ts: int | None) -> str:
     """Format a Unix timestamp (seconds) as 'YYYY-MM-DD HH:MM UTC'."""
     if ts is None:
         return "Unknown"
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def get_authorization_header(ctx: Context) -> str:

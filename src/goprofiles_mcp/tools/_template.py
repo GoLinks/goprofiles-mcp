@@ -107,7 +107,9 @@ def _format_example(e: ExampleResult) -> str:
 async def search_examples(
     search: Annotated[
         str | None,
-        Field(description="Search term matched against the example name (substring match)."),
+        Field(
+            description="Search term matched against the example name (substring match)."
+        ),
     ] = None,
     status: Annotated[
         ExampleStatus | None,
