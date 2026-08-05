@@ -18,17 +18,17 @@ def main() -> None:
         "MCP_RESOURCE_METADATA_URL",
         "https://mcp.goprofiles.io/.well-known/oauth-protected-resource/mcp",
     )
-    # Stateful sessions live in the memory of one task, so they don't survive a
-    # hosted client that spreads calls across workers, an ECS task restart, or a
-    # second task behind the ALB — the follow-up lands somewhere that never saw
-    # the initialize and gets 400 (no Mcp-Session-Id) or 404 (unknown session).
-    # search_people is read-only and uses no progress/sampling/subscriptions, so
-    # there is no reason to keep per-connection state. Escape hatch in case a
-    # future tool needs server->client push.
+    # Stateful sessions live in the memory of one task. That's fine as long as
+    # there's exactly one running task and it isn't replaced mid-session — a
+    # restart or a second task behind the ALB sends a session's follow-up
+    # requests somewhere that never saw the initialize, which fails as 400 (no
+    # Mcp-Session-Id) or 404 (unknown session).
     #
-    # TEMPORARY (revert me): default flipped to stateful to confirm in prod that
-    # ChatGPT's 502 is really the 400/404 above. Once confirmed, restore the
-    # default to "true" — stateless is the correct mode for this server.
+    # Set MCP_STATELESS=true to drop sessions entirely: every request becomes
+    # self-contained, at the cost of server->client push (ctx.report_progress,
+    # ctx.sample, ctx.elicit, resource-subscription notifications). search_people
+    # doesn't use any of those, so stateless is a safe fallback if task restarts
+    # or multi-task scaling become a problem.
     stateless = os.environ.get("MCP_STATELESS", "false").lower() == "true"
 
     asyncio.run(
