@@ -397,6 +397,20 @@ async def _api_get(
     return response
 
 
+async def _enrichment_results(
+    path: str,
+    params: dict,
+    authorization: str,
+    response_model: type[CertificationsResponse] | type[LanguagesResponse],
+) -> list[dict[str, Any]]:
+    """Fetch an enrichment list endpoint; treat 404 as an empty list."""
+    try:
+        response = await _api_get(path, params, authorization)
+    except LookupError:
+        return []
+    return response_model.model_validate(response.json()).results
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -653,25 +667,22 @@ async def get_profile(
         {"include_uid": uid, "limit": 200, "offset": 0}, tool="get_profile"
     )
 
-    try:
-        cert_response, lang_response = await asyncio.gather(
-            _api_get(
-                "/certifications.php",
-                cert_params,
-                authorization,
-                not_found_message=not_found,
-            ),
-            _api_get(
-                "/languages/index.php",
-                lang_params,
-                authorization,
-                not_found_message=not_found,
-            ),
-        )
-    except LookupError:
-        return not_found
+    # Certs and languages are enrichment only — a 404 must not discard the
+    # profile already loaded from users.php.
+    certifications, languages = await asyncio.gather(
+        _enrichment_results(
+            "/certifications.php",
+            cert_params,
+            authorization,
+            CertificationsResponse,
+        ),
+        _enrichment_results(
+            "/languages/index.php",
+            lang_params,
+            authorization,
+            LanguagesResponse,
+        ),
+    )
 
-    certifications = CertificationsResponse.model_validate(cert_response.json()).results
-    languages = LanguagesResponse.model_validate(lang_response.json()).results
     profile = _normalize_profile(user_raw, certifications, languages)
     return _format_profile(profile)
