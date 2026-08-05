@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.people import search_people
+from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
 _ISSUER = os.environ.get("GOPROFILES_OAUTH_ISSUER", "https://www.goprofiles.io")
@@ -40,6 +40,20 @@ mcp.add_tool(
         title="Search people",
         annotations=ToolAnnotations(
             title="Search people",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    FunctionTool.from_function(
+        get_profile,
+        title="Get profile",
+        annotations=ToolAnnotations(
+            title="Get profile",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
