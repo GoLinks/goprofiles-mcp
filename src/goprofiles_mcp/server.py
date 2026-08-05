@@ -10,8 +10,7 @@ from starlette.types import ASGIApp
 
 from goprofiles_mcp.tools.people import search_people
 
-# OAuth discovery env vars with production defaults.
-# Scopes are empty until GoProfiles OAuth scopes are defined for this server.
+# OAuth discovery env vars with production defaults
 _ISSUER = os.environ.get("GOPROFILES_OAUTH_ISSUER", "https://www.goprofiles.io")
 _AUTHORIZE_URL = os.environ.get(
     "GOPROFILES_OAUTH_AUTHORIZE_URL",
@@ -27,10 +26,11 @@ _REVOKE_URL = os.environ.get(
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
 
-# ChatGPT custom-connector domain verification token (from the ChatGPT connector UI).
+_SCOPES = ["profiles:read", "profiles:write", "search:read", "users:read"]
+# ChatGPT domain verification for mcp.goprofiles.io — same role as golinks-mcp's
+# hardcoded token. Set via ECS env, or paste the token ChatGPT shows when verifying
+# the connector domain.
 _OPENAI_CHALLENGE_TOKEN = os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN", "")
-
-_SCOPES: list[str] = ["search:read"]
 
 mcp = fastmcp.FastMCP("GoProfiles")
 
@@ -61,7 +61,9 @@ class RequireBearerOnMCP(BaseHTTPMiddleware):
         self._resource_metadata_url = resource_metadata_url
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        if request.url.path == "/mcp":
+        # rstrip so "/mcp/" is gated too — an exact match let the trailing-slash
+        # form skip the challenge and fall straight through to a redirect.
+        if request.url.path.rstrip("/") == "/mcp":
             auth = request.headers.get("authorization", "")
             if not auth.lower().startswith("bearer "):
                 return JSONResponse(
@@ -85,6 +87,8 @@ async def health(request: Request) -> JSONResponse:
 @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
 async def openai_challenge(request: Request) -> Response:
     """Domain verification for ChatGPT custom connectors (same pattern as golinks-mcp)."""
+    # 404 rather than an empty 200 when unset: serving a blank body reads as a
+    # successful verification with the wrong token, which is harder to diagnose.
     if not _OPENAI_CHALLENGE_TOKEN:
         return JSONResponse({"error": "not_found"}, status_code=404)
     return PlainTextResponse(_OPENAI_CHALLENGE_TOKEN)

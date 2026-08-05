@@ -18,6 +18,14 @@ def main() -> None:
         "MCP_RESOURCE_METADATA_URL",
         "https://mcp.goprofiles.io/.well-known/oauth-protected-resource/mcp",
     )
+    # Stateful sessions live in the memory of one task, so they don't survive a
+    # hosted client that spreads calls across workers, an ECS task restart, or a
+    # second task behind the ALB — the follow-up lands somewhere that never saw
+    # the initialize and gets 400 (no Mcp-Session-Id) or 404 (unknown session).
+    # search_people is read-only and uses no progress/sampling/subscriptions, so
+    # there is no reason to keep per-connection state. Escape hatch in case a
+    # future tool needs server->client push.
+    stateless = os.environ.get("MCP_STATELESS", "true").lower() != "false"
 
     asyncio.run(
         mcp.run_http_async(
@@ -25,12 +33,23 @@ def main() -> None:
             host=host,
             port=port,
             path="/mcp",
+            stateless_http=stateless,
             middleware=[
                 Middleware(
                     RequireBearerOnMCP,
                     resource_metadata_url=resource_metadata_url,
                 )
             ],
+            # We sit behind an ALB that terminates TLS and forwards plain HTTP.
+            # Without trusting X-Forwarded-Proto/-For, uvicorn thinks the scheme is
+            # "http", so any redirect Starlette generates (notably the /mcp/ ->
+            # /mcp trailing-slash 307) points at http://mcp.goprofiles.io. A client
+            # that follows it gets downgraded to plain HTTP, bounces off the ALB's
+            # 301 back to https, and loses its POST body on the way.
+            uvicorn_config={
+                "proxy_headers": True,
+                "forwarded_allow_ips": "*",
+            },
             show_banner=False,
         )
     )
