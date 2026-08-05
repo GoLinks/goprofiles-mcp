@@ -1,13 +1,18 @@
 import os
+from collections.abc import Callable
+from typing import Any
 
 import fastmcp
 from fastmcp.tools.function_tool import FunctionTool
+from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
+from goprofiles_mcp.tools.bravos import search_bravo_types
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -26,17 +31,55 @@ _REVOKE_URL = os.environ.get(
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
 
+# Union of scopes this server may request. Individual tools declare a subset via
+# securitySchemes — without that, ChatGPT treats every tool as needing all of these.
 _SCOPES = ["profiles:read", "profiles:write", "search:read", "users:read"]
 # ChatGPT domain verification for mcp.goprofiles.io — same role as golinks-mcp's
 # hardcoded token. Set via ECS env, or paste the token ChatGPT shows when verifying
 # the connector domain.
 _OPENAI_CHALLENGE_TOKEN = os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN", "")
 
+
+class _ScopedFunctionTool(FunctionTool):
+    """FunctionTool that emits Apps SDK `securitySchemes` on tools/list.
+
+    FastMCP's to_mcp_tool does not forward securitySchemes. Without a per-tool
+    declaration, ChatGPT inherits scopes_supported for every tool.
+    """
+
+    security_schemes: list[dict[str, Any]] = Field(default_factory=list)
+
+    def to_mcp_tool(self, **overrides: Any) -> MCPTool:
+        mcp_tool = super().to_mcp_tool(**overrides)
+        schemes = overrides.get("securitySchemes", self.security_schemes)
+        if not schemes:
+            return mcp_tool
+        payload = mcp_tool.model_dump(by_alias=True, exclude_none=True)
+        payload["securitySchemes"] = schemes
+        return MCPTool.model_validate(payload)
+
+
+def _oauth2_tool(
+    fn: Callable[..., Any],
+    *,
+    scopes: list[str],
+    title: str,
+    annotations: ToolAnnotations,
+) -> _ScopedFunctionTool:
+    """Register-ready tool with oauth2 securitySchemes limited to `scopes`."""
+    base = FunctionTool.from_function(fn, title=title, annotations=annotations)
+    data = base.model_dump()
+    data["fn"] = base.fn
+    data["security_schemes"] = [{"type": "oauth2", "scopes": list(scopes)}]
+    return _ScopedFunctionTool.model_validate(data)
+
+
 mcp = fastmcp.FastMCP("GoProfiles")
 
 mcp.add_tool(
-    FunctionTool.from_function(
+    _oauth2_tool(
         search_people,
+        scopes=["search:read"],
         title="Search people",
         annotations=ToolAnnotations(
             title="Search people",
@@ -49,11 +92,27 @@ mcp.add_tool(
 )
 
 mcp.add_tool(
-    FunctionTool.from_function(
+    _oauth2_tool(
         get_profile,
+        scopes=["profiles:read"],
         title="Get profile",
         annotations=ToolAnnotations(
             title="Get profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        search_bravo_types,
+        scopes=["search:read"],
+        title="Search bravo types",
+        annotations=ToolAnnotations(
+            title="Search bravo types",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
