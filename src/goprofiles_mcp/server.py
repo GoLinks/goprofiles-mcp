@@ -5,7 +5,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from mcp.types import ToolAnnotations
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
 from goprofiles_mcp.tools.people import search_people
@@ -26,6 +26,9 @@ _REVOKE_URL = os.environ.get(
     "https://api.goprofiles.io/oauth/revoke",
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
+
+# ChatGPT custom-connector domain verification token (from the ChatGPT connector UI).
+_OPENAI_CHALLENGE_TOKEN = os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN", "")
 
 _SCOPES: list[str] = ["search:read"]
 
@@ -79,6 +82,14 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+@mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
+async def openai_challenge(request: Request) -> Response:
+    """Domain verification for ChatGPT custom connectors (same pattern as golinks-mcp)."""
+    if not _OPENAI_CHALLENGE_TOKEN:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return PlainTextResponse(_OPENAI_CHALLENGE_TOKEN)
+
+
 @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
 async def oauth_protected_resource_metadata(request: Request) -> JSONResponse:
     return JSONResponse(
@@ -103,18 +114,27 @@ async def oauth_protected_resource_metadata_mcp(request: Request) -> JSONRespons
     )
 
 
+def _authorization_server_metadata() -> dict:
+    """OAuth AS metadata (RFC 8414). Also served at openid-configuration for clients
+    that probe the OIDC discovery path first (e.g. ChatGPT connectors)."""
+    return {
+        "issuer": _ISSUER,
+        "authorization_endpoint": _AUTHORIZE_URL,
+        "token_endpoint": _TOKEN_URL,
+        "revocation_endpoint": _REVOKE_URL,
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": _SCOPES,
+    }
+
+
 @mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
 async def oauth_authorization_server_metadata(request: Request) -> JSONResponse:
-    return JSONResponse(
-        {
-            "issuer": _ISSUER,
-            "authorization_endpoint": _AUTHORIZE_URL,
-            "token_endpoint": _TOKEN_URL,
-            "revocation_endpoint": _REVOKE_URL,
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "refresh_token"],
-            "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": _SCOPES,
-        }
-    )
+    return JSONResponse(_authorization_server_metadata())
+
+
+@mcp.custom_route("/.well-known/openid-configuration", methods=["GET"])
+async def openid_configuration(request: Request) -> JSONResponse:
+    return JSONResponse(_authorization_server_metadata())
