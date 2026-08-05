@@ -1,10 +1,14 @@
 import os
 
 import fastmcp
+from fastmcp.tools.function_tool import FunctionTool
+from mcp.types import ToolAnnotations
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
+
+from goprofiles_mcp.tools.people import search_people
 
 # OAuth discovery env vars with production defaults.
 # Scopes are empty until GoProfiles OAuth scopes are defined for this server.
@@ -23,28 +27,23 @@ _REVOKE_URL = os.environ.get(
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
 
-_SCOPES: list[str] = []
+_SCOPES: list[str] = ["search:read"]
 
 mcp = fastmcp.FastMCP("GoProfiles")
 
-# Register tools here, e.g.:
-# from fastmcp.tools.function_tool import FunctionTool
-# from mcp.types import ToolAnnotations
-# from goprofiles_mcp.tools.example import example_tool
-#
-# mcp.add_tool(
-#     FunctionTool.from_function(
-#         example_tool,
-#         title="Example tool",
-#         annotations=ToolAnnotations(
-#             title="Example tool",
-#             readOnlyHint=True,
-#             destructiveHint=False,
-#             idempotentHint=True,
-#             openWorldHint=False,
-#         ),
-#     )
-# )
+mcp.add_tool(
+    FunctionTool.from_function(
+        search_people,
+        title="Search people",
+        annotations=ToolAnnotations(
+            title="Search people",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
 
 
 class RequireBearerOnMCP(BaseHTTPMiddleware):
