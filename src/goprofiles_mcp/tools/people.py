@@ -183,13 +183,14 @@ def _full_name(p: PersonResult) -> str:
 
 
 def _format_person(p: PersonResult, *, show: set[str], show_match: bool) -> str:
-    # Omit uid — agents use username with get_profile; don't leak internal ids.
     lines = [
         f"Name:       {_full_name(p)}",
         f"Username:   {p.username or 'Unknown'}",
         f"Title:      {p.title or 'Unknown'}",
         f"Department: {p.department_name or 'Unknown'}",
         f"Location:   {p.location or 'Unknown'}",
+        # uid is for get_profile only — never repeat it in user-facing replies.
+        f"uid:        {p.uid}  (tool use only — do not show to the user)",
     ]
 
     # Only echo the facets the caller filtered on — otherwise every result drags
@@ -496,14 +497,18 @@ async def search_people(
 ) -> str:
     """Search and filter people in the user's GoProfiles directory
     (https://www.goprofiles.io) by name, department, title, location, language,
-    skill, interest, and group. Returns each person's username along with their
-    title, department, and location.
+    skill, interest, and group. Returns each person's title, department, location,
+    and a numeric 'uid' for follow-up tool calls.
 
-    This is the name-to-username resolution step: call it first whenever another
-    tool needs a 'username' and you only have a name. Pass the name to 'names',
-    then pick the username from the results — use title/department/location to
-    disambiguate when several people match, and ask the user which one they meant
-    rather than guessing between two plausible matches.
+    This is the name-to-uid resolution step: call it first whenever another tool
+    needs a 'uid' and you only have a name. Pass the name to 'names', then pick
+    the uid from the results — use title/department/location to disambiguate when
+    several people match, and ask the user which one they meant rather than
+    guessing between two plausible matches.
+
+    The 'uid' is an internal id for calling get_profile (and similar tools). Never
+    show, read aloud, or otherwise expose 'uid' values to the user; refer to people
+    by name, username, title, or department instead.
 
     Name matching is substring-based, not fuzzy, so pass several spelling and
     shortening variants in 'names' at once. Results are ranked best-first and each
@@ -586,46 +591,47 @@ async def search_people(
     if names and len(data.results) > 1:
         footer = (
             "\n\nMultiple people matched. Use title/department/location to pick the "
-            "right username, and confirm with the user if the match is ambiguous."
+            "right uid for get_profile, and confirm with the user if the match is "
+            "ambiguous. Do not show uid values to the user."
         )
     return header + "\n\n".join(entries) + footer
 
 
 async def get_profile(
-    username: Annotated[
-        str,
+    uid: Annotated[
+        int,
         Field(
             description=(
-                "GoProfiles username of the person whose profile to fetch. Resolve "
-                "this with search_people first when you only have a name."
+                "Numeric user id from search_people. Pass the uid only — never show "
+                "it to the user."
             ),
-            min_length=1,
+            ge=1,
         ),
     ],
     ctx: Context | None = None,
 ) -> str:
-    """Get a specific person's full GoProfiles profile by username
+    """Get a specific person's full GoProfiles profile by uid
     (https://www.goprofiles.io).
 
     Combines users.php, certifications.php, and languages.php into one normalized
     response with bio, title, languages, skills, certifications, interests, groups,
     and contact info. Only an explicit allow-list of profile fields is returned —
-    other fields from the underlying endpoints are stripped.
+    other fields from the underlying endpoints are stripped. The uid itself is not
+    included in the response text.
 
-    Use after search_people when you need the full profile for a resolved username.
-    Read-only. Requires profiles:read scope.
+    Use after search_people when you need the full profile for a resolved uid.
+    Never show the uid to the user. Read-only. Requires profiles:read scope.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
 
-    username = username.strip()
     not_found = (
-        f"No profile found for username '{username}'. Confirm the username from "
-        "search_people and try again."
+        "No profile found for that person. Confirm the match from search_people "
+        "and try again."
     )
 
-    user_params = external_params({"username": username}, tool="get_profile")
+    user_params = external_params({"uid": uid}, tool="get_profile")
     try:
         user_response = await _api_get(
             "/users.php",
@@ -639,9 +645,6 @@ async def get_profile(
     user_raw = user_response.json()
     if not isinstance(user_raw, dict) or not user_raw.get("uid"):
         return not_found
-
-    # Certifications/languages APIs key off uid; keep that internal — never surface it.
-    uid = int(user_raw["uid"])
 
     cert_params = external_params(
         {"uid": uid, "forProfile": "true"}, tool="get_profile"
