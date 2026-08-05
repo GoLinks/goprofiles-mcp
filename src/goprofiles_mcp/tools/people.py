@@ -81,7 +81,7 @@ def _full_name(p: PersonResult) -> str:
     return f"{p.first_name} {p.last_name}".strip() or p.username or "Unknown"
 
 
-def _format_person(p: PersonResult, *, show: set[str]) -> str:
+def _format_person(p: PersonResult, *, show: set[str], show_match: bool) -> str:
     lines = [
         f"UID:        {p.uid}",
         f"Name:       {_full_name(p)}",
@@ -108,7 +108,10 @@ def _format_person(p: PersonResult, *, show: set[str]) -> str:
     if p.unlicensed_profile:
         lines.append("Note:       Unlicensed profile — may have incomplete data.")
 
-    lines.append(f"Match:      {_match_quality(p.rating)}")
+    # Match quality only applies to name search. Filter-only calls may omit rating
+    # (default 0.0), which would otherwise look like an exact name hit.
+    if show_match:
+        lines.append(f"Match:      {_match_quality(p.rating)}")
     return "\n".join(lines)
 
 
@@ -285,8 +288,9 @@ async def search_people(
 
     m = data.metadata
     header = f"People ({m.count} of {m.total_results} total, offset {m.offset}):\n"
+    show_match = bool(names)
     entries = [
-        f"[{i}]\n{_format_person(p, show=show)}"
+        f"[{i}]\n{_format_person(p, show=show, show_match=show_match)}"
         for i, p in enumerate(data.results, 1)
     ]
     footer = ""
