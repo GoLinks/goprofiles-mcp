@@ -159,9 +159,9 @@ async def search_bravo_types(
     workspace (https://www.goprofiles.io).
 
     REQUIRED before create_bravo in every conversation. Always call this tool in
-    the current chat before previewing or sending a Bravo — even if you already
-    "know" a badge name like Team Player from another chat, memory, or examples.
-    Badge ids (bid) are workspace-specific and must come from this tool's output.
+    the current chat before sending a Bravo — even if you already "know" a badge
+    name like Team Player from another chat, memory, or examples. Badge ids (bid)
+    are workspace-specific and must come from this tool's output.
 
     Returns each badge type's name, description, and a numeric 'bid' for
     create_bravo. Pass that bid plus the exact Name string as badge_name.
@@ -260,22 +260,13 @@ async def create_bravo(
                 "'comment' field). Keep it under 850 characters. Omit when the "
                 "user has not supplied text yet — the tool will tell you to ask "
                 "whether to draft a message or wait for theirs. Never invent a "
-                "message and send it without asking."
+                "message and send it without asking. Clients such as ChatGPT "
+                "ask before write tools run; pass the final text you want the "
+                "user to approve in that confirmation."
             ),
             max_length=850,
         ),
     ] = None,
-    confirmed: Annotated[
-        bool,
-        Field(
-            description=(
-                "Must stay false until the user has approved the recipient, "
-                "badge type, and exact message text. A false call only returns a "
-                "preview and does not send. Re-call with confirmed=true only "
-                "after they explicitly agree to send."
-            ),
-        ),
-    ] = False,
     ctx: Context | None = None,
 ) -> str:
     """Give a Bravo badge to a coworker in the user's GoProfiles workspace
@@ -291,13 +282,13 @@ async def create_bravo(
     2. If the user did not supply a recognition message, ask whether they want
        you to draft one for their review or provide the text themselves. Never
        silently invent a message and send it.
-    3. Call this tool with confirmed=false (default) to get a catalog-verified
-       preview. Show the user recipient name + the verified badge name from the
-       tool output (never show uid or bid) and ask: Send this Bravo?
-    4. Call again with the same receiver_uid, bid, badge_name, and message, and
-       confirmed=true, only after they explicitly approve. Do not claim the Bravo
-       was sent unless that call returns a success line (e.g. "bravo sent
-       successfully" / Successful: N).
+    3. Call this tool once with the final receiver_uid, bid, badge_name, and
+       message. This is a write tool (readOnlyHint=false): ChatGPT and similar
+       clients prompt the user before the call runs — that confirmation is the
+       send gate. Pass human-readable badge_name and the exact message so the
+       approval UI shows what will be sent. Do not claim the Bravo was sent
+       unless the tool returns a success line (e.g. "bravo sent successfully"
+       / Successful: N).
 
     The giver is always the OAuth-authenticated user from the Bearer token —
     never accept or invent a giver uid. Never show, read aloud, or otherwise
@@ -320,24 +311,12 @@ async def create_bravo(
             "you to draft a recognition message for their review, or provide the "
             "text themselves. Do not invent and send a message without asking. "
             "After they choose and the text is ready, call create_bravo again "
-            "with that message, the same bid/badge_name from search_bravo_types, "
-            "and confirmed=false to preview, then confirmed=true only after they "
-            "approve."
+            "with that message and the same bid/badge_name from "
+            "search_bravo_types. The client will ask the user to approve the "
+            "write before it sends."
         )
 
     message = message.strip()
-
-    if not confirmed:
-        return (
-            "Bravo ready to send (NOT sent yet — do not tell the user it was sent).\n"
-            f"Verified badge: {resolved.name}\n"
-            f"Message:\n{message}\n\n"
-            "Show the user a short summary using the recipient name from "
-            "search_people and this verified badge name (never show uid or bid). "
-            "Ask explicitly: Send this Bravo? Only if they say yes, call "
-            "create_bravo again with the same receiver_uid, bid, badge_name, and "
-            "message, and confirmed=true."
-        )
 
     params = external_params(tool="create_bravo")
 
