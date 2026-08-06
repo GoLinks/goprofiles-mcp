@@ -8,12 +8,14 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 from starlette.middleware import Middleware
 
+from goprofiles_mcp.client import GOPROFILES_API_URL
 from goprofiles_mcp.server import RequireBearerOnMCP, mcp
 
 
 def main() -> None:
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8000"))
+    print(f"GoProfiles API base: {GOPROFILES_API_URL}", flush=True)
     resource_metadata_url = os.environ.get(
         "MCP_RESOURCE_METADATA_URL",
         "https://mcp.goprofiles.io/.well-known/oauth-protected-resource/mcp",
