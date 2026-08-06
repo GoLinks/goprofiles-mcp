@@ -3,6 +3,8 @@ from collections.abc import Callable
 from typing import Any
 
 import fastmcp
+from fastmcp.apps import AppConfig, ResourceCSP
+from fastmcp.apps.config import app_config_to_meta_dict
 from fastmcp.tools.function_tool import FunctionTool
 from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
@@ -12,7 +14,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import create_bravo, search_bravo_types
+from goprofiles_mcp.tools.bravos import (
+    BRAVO_PREVIEW_URI,
+    bravo_preview_html,
+    prepare_bravo,
+    search_bravo_types,
+    send_bravo,
+)
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -65,9 +73,35 @@ def _oauth2_tool(
     scopes: list[str],
     title: str,
     annotations: ToolAnnotations,
+    invoking: str,
+    invoked: str,
+    app: AppConfig | None = None,
+    extra_meta: dict[str, Any] | None = None,
 ) -> _ScopedFunctionTool:
-    """Register-ready tool with oauth2 securitySchemes limited to `scopes`."""
-    base = FunctionTool.from_function(fn, title=title, annotations=annotations)
+    """Register-ready tool with oauth2 securitySchemes and ChatGPT status strings.
+
+    `invoking` / `invoked` are ChatGPT Apps SDK status strings (max 64 chars).
+    Optional `app` sets `_meta.ui` (resourceUri / visibility) for MCP Apps.
+    """
+    if len(invoking) > 64 or len(invoked) > 64:
+        raise ValueError("ChatGPT toolInvocation status strings must be ≤64 chars")
+
+    meta: dict[str, Any] = {
+        "openai/toolInvocation/invoking": invoking,
+        "openai/toolInvocation/invoked": invoked,
+        **(extra_meta or {}),
+    }
+    if app is not None:
+        meta["ui"] = app_config_to_meta_dict(app)
+        if app.resource_uri:
+            meta.setdefault("openai/outputTemplate", app.resource_uri)
+
+    base = FunctionTool.from_function(
+        fn,
+        title=title,
+        annotations=annotations,
+        meta=meta,
+    )
     data = base.model_dump()
     data["fn"] = base.fn
     data["security_schemes"] = [{"type": "oauth2", "scopes": list(scopes)}]
@@ -76,11 +110,31 @@ def _oauth2_tool(
 
 mcp = fastmcp.FastMCP("GoProfiles")
 
+# Confirmation widget for prepare_bravo (CSP allowlists CDN images + ext-apps JS).
+@mcp.resource(
+    BRAVO_PREVIEW_URI,
+    app=AppConfig(
+        csp=ResourceCSP(
+            resource_domains=[
+                "https://unpkg.com",
+                "https://images.goprofiles.io",
+                "https://images-dev.goprofiles.io",
+            ],
+        ),
+        prefers_border=True,
+    ),
+)
+def bravo_preview_resource() -> str:
+    return bravo_preview_html()
+
+
 mcp.add_tool(
     _oauth2_tool(
         search_people,
         scopes=["search:read"],
         title="Search people",
+        invoking="Searching people…",
+        invoked="People search complete",
         annotations=ToolAnnotations(
             title="Search people",
             readOnlyHint=True,
@@ -96,6 +150,8 @@ mcp.add_tool(
         get_profile,
         scopes=["profiles:read"],
         title="Get profile",
+        invoking="Loading profile…",
+        invoked="Profile ready",
         annotations=ToolAnnotations(
             title="Get profile",
             readOnlyHint=True,
@@ -111,6 +167,8 @@ mcp.add_tool(
         search_bravo_types,
         scopes=["search:read"],
         title="Search bravo types",
+        invoking="Searching bravo types…",
+        invoked="Bravo types ready",
         annotations=ToolAnnotations(
             title="Search bravo types",
             readOnlyHint=True,
@@ -123,17 +181,40 @@ mcp.add_tool(
 
 mcp.add_tool(
     _oauth2_tool(
-        create_bravo,
-        # search:read is required so create_bravo can verify bid/badge_name
-        # against GET /bravos.php before sending.
-        scopes=["profiles:write", "search:read"],
-        title="Create bravo",
+        prepare_bravo,
+        scopes=["search:read"],
+        title="Prepare bravo",
+        invoking="Preparing Bravo draft…",
+        invoked="Bravo draft ready",
+        app=AppConfig(
+            resource_uri=BRAVO_PREVIEW_URI,
+            visibility=["model", "app"],
+        ),
         annotations=ToolAnnotations(
-            title="Create bravo",
-            readOnlyHint=False,
+            title="Prepare bravo",
+            readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=False,
             openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        send_bravo,
+        scopes=["profiles:write"],
+        title="Send bravo",
+        invoking="Sending Bravo…",
+        invoked="Bravo finished",
+        # UI-only: model cannot send; widget Send button calls this tool.
+        app=AppConfig(visibility=["app"]),
+        annotations=ToolAnnotations(
+            title="Send bravo",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
         ),
     )
 )
