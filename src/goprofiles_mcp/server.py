@@ -124,7 +124,9 @@ mcp.add_tool(
 mcp.add_tool(
     _oauth2_tool(
         create_bravo,
-        scopes=["profiles:write"],
+        # search:read is required so create_bravo can verify bid/badge_name
+        # against GET /bravos.php before previewing or sending.
+        scopes=["profiles:write", "search:read"],
         title="Create bravo",
         annotations=ToolAnnotations(
             title="Create bravo",
