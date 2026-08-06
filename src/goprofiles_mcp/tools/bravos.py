@@ -1,5 +1,8 @@
 """Bravo tools — badge type catalog search and giving bravos"""
 
+import hashlib
+import hmac
+import os
 from typing import Annotated
 
 import httpx
@@ -11,6 +14,11 @@ from goprofiles_mcp.client import (
     get_authorization_header,
     http_client,
     raise_for_status,
+)
+
+# Tokens are only printed by search_bravo_types; create_bravo rejects invented ones.
+_BADGE_TOKEN_SECRET = os.environ.get(
+    "GOPROFILES_MCP_BADGE_TOKEN_SECRET", "goprofiles-mcp-badge-token"
 )
 
 # ---------------------------------------------------------------------------
@@ -68,12 +76,25 @@ def _match_score(badge: BravoTypeResult, query: str) -> int | None:
     return None
 
 
+def _badge_token(bid: int, name: str) -> str:
+    """Opaque token proving bid/name came from search_bravo_types output."""
+    payload = f"{bid}\n{name.strip().lower()}".encode()
+    digest = hmac.new(
+        _BADGE_TOKEN_SECRET.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:24]
+
+
 def _format_bravo_type(b: BravoTypeResult) -> str:
+    token = _badge_token(b.bid, b.name)
     lines = [
         f"Name:        {b.name or 'Unknown'}",
         f"Description: {b.description or 'None'}",
-        # bid is for create_bravo only — never repeat it in user-facing replies.
+        # bid / badge_token are for create_bravo only — never show to the user.
         f"bid:         {b.bid}  (tool use only — do not show to the user)",
+        f"badge_token: {token}  (tool use only — pass to create_bravo; do not show)",
     ]
     return "\n".join(lines)
 
@@ -127,6 +148,22 @@ def _validate_badge(
     return match
 
 
+def _validate_badge_token(bid: int, name: str, badge_token: str) -> str | None:
+    """Return an error string if badge_token was not issued for this bid/name."""
+    expected = _badge_token(bid, name)
+    provided = badge_token.strip().lower()
+    if provided and hmac.compare_digest(expected, provided):
+        return None
+    return (
+        "Invalid or missing badge_token. You MUST call search_bravo_types in THIS "
+        "conversation first, then pass that result's bid, exact Name as "
+        "badge_name, and badge_token together. Do not invent a badge from memory "
+        "or other chats — inventing bid/badge_name without a matching "
+        "badge_token from search_bravo_types will always fail. Do not show "
+        "bid or badge_token to the user."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -163,15 +200,16 @@ async def search_bravo_types(
     name like Team Player from another chat, memory, or examples. Badge ids (bid)
     are workspace-specific and must come from this tool's output.
 
-    Returns each badge type's name, description, and a numeric 'bid' for
-    create_bravo. Pass that bid plus the exact Name string as badge_name.
+    Returns each badge type's name, description, a numeric 'bid', and a
+    badge_token for create_bravo. Pass bid, the exact Name as badge_name, and
+    badge_token from the same result — create_bravo rejects invented badges.
 
     Matching is case-insensitive substring against both name and description —
     not fuzzy — so a misspelling returns nothing. Prefer a short distinctive
     phrase from the recognition theme (e.g. 'above and beyond', 'mentor').
 
-    The 'bid' is an internal id for create_bravo. Never show, read aloud, or
-    otherwise expose 'bid' values to the user; refer to badge types by name.
+    The 'bid' and 'badge_token' are internal for create_bravo. Never show, read
+    aloud, or otherwise expose them to the user; refer to badge types by name.
 
     Read-only. Requires search:read scope.
     """
@@ -203,9 +241,10 @@ async def search_bravo_types(
     header = f"Bravo badge types ({len(matches)} of {total} matched):\n"
     entries = [f"[{i}]\n{_format_bravo_type(b)}" for i, b in enumerate(matches, 1)]
     footer = (
-        "\n\nUse one of these results with create_bravo: copy bid and the exact "
-        "Name as badge_name. Do not use any bid/name that did not appear above. "
-        "Do not show bid values to the user."
+        "\n\nUse one of these results with create_bravo: copy bid, the exact "
+        "Name as badge_name, and badge_token from the same row. Do not invent "
+        "or reuse values that did not appear above. Do not show bid or "
+        "badge_token to the user."
     )
     if len(matches) > 1:
         footer += (
@@ -252,6 +291,17 @@ async def create_bravo(
             min_length=1,
         ),
     ],
+    badge_token: Annotated[
+        str,
+        Field(
+            description=(
+                "Opaque badge_token from the same search_bravo_types result as "
+                "bid and badge_name. Required — inventing a badge without calling "
+                "search_bravo_types will fail. Never show this value to the user."
+            ),
+            min_length=1,
+        ),
+    ],
     message: Annotated[
         str | None,
         Field(
@@ -275,20 +325,22 @@ async def create_bravo(
     Required workflow — do not skip steps:
 
     1. In THIS conversation, resolve the recipient with search_people
-       (receiver_uid) and the badge with search_bravo_types (bid + badge_name).
-       Never skip search_bravo_types, even for familiar names like Team Player.
-       Never reuse uid/bid/badge_name from other chats, memory, or examples.
-       Confirm with the user when either match is ambiguous.
+       (receiver_uid) and the badge with search_bravo_types (bid + badge_name
+       + badge_token). Never skip search_bravo_types — even for familiar names
+       like Team Player — create_bravo rejects badges without a badge_token
+       from that tool. Never reuse uid/bid/badge_name/badge_token from other
+       chats, memory, or examples. Confirm with the user when either match is
+       ambiguous.
     2. If the user did not supply a recognition message, ask whether they want
        you to draft one for their review or provide the text themselves. Never
        silently invent a message and send it.
-    3. Call this tool once with the final receiver_uid, bid, badge_name, and
-       message. This is a write tool (readOnlyHint=false): ChatGPT and similar
-       clients prompt the user before the call runs — that confirmation is the
-       send gate. Pass human-readable badge_name and the exact message so the
-       approval UI shows what will be sent. Do not claim the Bravo was sent
-       unless the tool returns a success line (e.g. "bravo sent successfully"
-       / Successful: N).
+    3. Call this tool once with the final receiver_uid, bid, badge_name,
+       badge_token, and message. This is a write tool (readOnlyHint=false):
+       ChatGPT and similar clients prompt the user before the call runs — that
+       confirmation is the send gate. Pass human-readable badge_name and the
+       exact message so the approval UI shows what will be sent. Do not claim
+       the Bravo was sent unless the tool returns a success line (e.g. "bravo
+       sent successfully" / Successful: N).
 
     The giver is always the OAuth-authenticated user from the Bearer token —
     never accept or invent a giver uid. Never show, read aloud, or otherwise
@@ -305,13 +357,17 @@ async def create_bravo(
     if isinstance(resolved, str):
         return resolved
 
+    token_error = _validate_badge_token(resolved.bid, resolved.name, badge_token)
+    if token_error is not None:
+        return token_error
+
     if not message or not message.strip():
         return (
             "Message is required before sending. Ask the user whether they want "
             "you to draft a recognition message for their review, or provide the "
             "text themselves. Do not invent and send a message without asking. "
             "After they choose and the text is ready, call create_bravo again "
-            "with that message and the same bid/badge_name from "
+            "with that message and the same bid/badge_name/badge_token from "
             "search_bravo_types. The client will ask the user to approve the "
             "write before it sends."
         )
