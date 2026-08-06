@@ -199,32 +199,77 @@ async def create_bravo(
         ),
     ],
     message: Annotated[
-        str,
+        str | None,
         Field(
             description=(
                 "Recognition message sent with the Bravo (maps to the API "
-                "'comment' field). Keep it under 850 characters."
+                "'comment' field). Keep it under 850 characters. Omit when the "
+                "user has not supplied text yet — the tool will tell you to ask "
+                "whether to draft a message or wait for theirs. Never invent a "
+                "message and send it without asking."
             ),
-            min_length=1,
             max_length=850,
         ),
-    ],
+    ] = None,
+    confirmed: Annotated[
+        bool,
+        Field(
+            description=(
+                "Must stay false until the user has approved the recipient, "
+                "badge type, and exact message text. A false call only returns a "
+                "preview and does not send. Re-call with confirmed=true only "
+                "after they explicitly agree to send."
+            ),
+        ),
+    ] = False,
     ctx: Context | None = None,
 ) -> str:
     """Give a Bravo badge to a coworker in the user's GoProfiles workspace
     (https://www.goprofiles.io) as the authenticated user.
 
-    The giver is always the OAuth-authenticated user from the Bearer token —
-    never accept or invent a giver uid. Resolve the recipient with
-    search_people (receiver_uid) and the badge type with search_bravo_types
-    (bid) before calling this tool. Confirm with the user when the person or
-    badge type is ambiguous.
+    Required workflow — do not skip steps:
 
-    Never show, read aloud, or otherwise expose receiver_uid or bid values to
-    the user; refer to people by name and badge types by name.
+    1. Resolve the recipient with search_people (receiver_uid) and the badge
+       type with search_bravo_types (bid). Confirm with the user when either
+       match is ambiguous.
+    2. If the user did not supply a recognition message, ask whether they want
+       you to draft one for their review or provide the text themselves. Never
+       silently invent a message and send it.
+    3. Call this tool with confirmed=false (default) to get a preview. Show the
+       user a short summary using recipient name and badge name from the earlier
+       searches (never show uid or bid) and ask: Send this Bravo?
+    4. Call again with the same receiver_uid, bid, and message, and
+       confirmed=true, only after they explicitly approve.
+
+    The giver is always the OAuth-authenticated user from the Bearer token —
+    never accept or invent a giver uid. Never show, read aloud, or otherwise
+    expose receiver_uid or bid values to the user.
 
     Not read-only. Requires profiles:write scope.
     """
+    if not message or not message.strip():
+        return (
+            "Message is required before sending. Ask the user whether they want "
+            "you to draft a recognition message for their review, or provide the "
+            "text themselves. Do not invent and send a message without asking. "
+            "After they choose and the text is ready, call create_bravo again "
+            "with that message and confirmed=false to preview, then "
+            "confirmed=true only after they approve."
+        )
+
+    message = message.strip()
+
+    if not confirmed:
+        return (
+            "Bravo ready to send (NOT sent yet).\n"
+            f"Message:\n{message}\n\n"
+            "Show the user a short summary using recipient name and badge name "
+            "from earlier search_people / search_bravo_types results (never show "
+            "uid or bid). Ask explicitly: Send this Bravo? Only if they say yes, "
+            "call create_bravo again with the same receiver_uid, bid, and "
+            "message, and confirmed=true."
+        )
+
     if ctx is None:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
