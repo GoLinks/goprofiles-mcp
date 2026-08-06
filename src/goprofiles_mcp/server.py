@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import search_bravo_types
+from goprofiles_mcp.tools.bravos import create_bravo, search_bravo_types
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -116,6 +116,21 @@ mcp.add_tool(
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        create_bravo,
+        scopes=["profiles:write"],
+        title="Create bravo",
+        annotations=ToolAnnotations(
+            title="Create bravo",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
             openWorldHint=False,
         ),
     )

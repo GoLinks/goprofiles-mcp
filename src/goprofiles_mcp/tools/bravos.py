@@ -1,4 +1,4 @@
-"""Bravo badge type tools — catalog search for giveable recognition badges."""
+"""Bravo tools — badge type catalog search and giving bravos"""
 
 from typing import Annotated
 
@@ -26,6 +26,16 @@ class BravoTypeResult(BaseModel):
 
 class BravoTypesResponse(BaseModel):
     results: list[BravoTypeResult] = []
+
+
+class CreateBravoResponse(BaseModel):
+    status: str = ""
+    message: str = ""
+    successful_count: int = 0
+    failed_count: int = 0
+    total_count: int = 0
+    comment_id: int | None = None
+    scheduled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -163,3 +173,99 @@ async def search_bravo_types(
             "ambiguous. Do not show bid values to the user."
         )
     return header + "\n\n".join(entries) + footer
+
+
+async def create_bravo(
+    receiver_uid: Annotated[
+        int,
+        Field(
+            description=(
+                "Numeric user id of the recipient from search_people. Pass the "
+                "uid only — never show it to the user. The giver is always the "
+                "authenticated user (from the OAuth token); do not invent or "
+                "pass a giver uid."
+            ),
+            ge=1,
+        ),
+    ],
+    bid: Annotated[
+        int,
+        Field(
+            description=(
+                "Numeric badge type id from search_bravo_types. Pass the bid "
+                "only — never show it to the user."
+            ),
+            ge=1,
+        ),
+    ],
+    message: Annotated[
+        str,
+        Field(
+            description=(
+                "Recognition message sent with the Bravo (maps to the API "
+                "'comment' field). Keep it under 850 characters."
+            ),
+            min_length=1,
+            max_length=850,
+        ),
+    ],
+    ctx: Context | None = None,
+) -> str:
+    """Give a Bravo badge to a coworker in the user's GoProfiles workspace
+    (https://www.goprofiles.io) as the authenticated user.
+
+    The giver is always the OAuth-authenticated user from the Bearer token —
+    never accept or invent a giver uid. Resolve the recipient with
+    search_people (receiver_uid) and the badge type with search_bravo_types
+    (bid) before calling this tool. Confirm with the user when the person or
+    badge type is ambiguous.
+
+    Never show, read aloud, or otherwise expose receiver_uid or bid values to
+    the user; refer to people by name and badge types by name.
+
+    Not read-only. Requires profiles:write scope.
+    """
+    if ctx is None:
+        raise PermissionError("Missing request context.")
+    authorization = get_authorization_header(ctx)
+
+    params = external_params(tool="create_bravo")
+
+    try:
+        response = await http_client.post(
+            "/bravos.php",
+            params=params,
+            data={
+                "bid": bid,
+                "comment": message,
+                "receiver_uids[]": receiver_uid,
+            },
+            headers={"Authorization": authorization},
+        )
+    except httpx.TimeoutException:
+        raise TimeoutError("Request to GoProfiles API timed out.")
+    except httpx.ConnectError:
+        raise ConnectionError("Failed to connect to GoProfiles API.")
+
+    raise_for_status(response, "/bravos.php")
+
+    data = CreateBravoResponse.model_validate(response.json())
+
+    if data.status == "failed" or data.successful_count == 0:
+        detail = data.message.strip() or "The Bravo could not be sent."
+        return (
+            f"Failed to send Bravo. {detail} Confirm the recipient from "
+            "search_people (you cannot give yourself a Bravo) and the badge "
+            "type from search_bravo_types, then try again. Do not show uid or "
+            "bid values to the user."
+        )
+
+    lines = [
+        data.message.strip() or "Bravo sent successfully.",
+        f"Successful: {data.successful_count}",
+    ]
+    if data.failed_count:
+        lines.append(f"Failed:     {data.failed_count}")
+    if data.scheduled:
+        lines.append("Note:       This Bravo was scheduled for later delivery.")
+    return "\n".join(lines)
