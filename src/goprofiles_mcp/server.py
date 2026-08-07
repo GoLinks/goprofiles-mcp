@@ -26,7 +26,14 @@ _REVOKE_URL = os.environ.get(
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
 
-_SCOPES = ["profiles:read", "profiles:write", "search:read", "users:read"]
+_SCOPES = [
+    "profiles:read",
+    "profiles:write",
+    "search:read",
+    "users:read",
+    "bravos:read",
+    "bravos:write",
+]
 # ChatGPT domain verification for mcp.goprofiles.io — same role as golinks-mcp's
 # hardcoded token. Set via ECS env, or paste the token ChatGPT shows when verifying
 # the connector domain.
