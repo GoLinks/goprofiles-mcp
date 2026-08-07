@@ -38,6 +38,11 @@ _REVOKE_URL = os.environ.get(
     "https://api.goprofiles.io/oauth/revoke",
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
+# Stable unique origin for the Bravo preview widget sandbox (required for ChatGPT
+# app submission). Override if you host widgets under another hostname.
+_WIDGET_DOMAIN = os.environ.get(
+    "GOPROFILES_MCP_WIDGET_DOMAIN", "https://bravo-preview.mcp.goprofiles.io"
+)
 
 # Union of scopes this server may request. Individual tools declare a subset via
 # securitySchemes — without that, ChatGPT treats every tool as needing all of these.
@@ -111,9 +116,11 @@ def _oauth2_tool(
 mcp = fastmcp.FastMCP("GoProfiles")
 
 # Confirmation widget for prepare_bravo (CSP allowlists CDN images + ext-apps JS).
+# `domain` is required by ChatGPT for a unique widget sandbox / app submission.
 @mcp.resource(
     BRAVO_PREVIEW_URI,
     app=AppConfig(
+        domain=_WIDGET_DOMAIN,
         csp=ResourceCSP(
             resource_domains=[
                 "https://unpkg.com",
