@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Any
 
 import fastmcp
-from fastmcp.apps import AppConfig, ResourceCSP
+from fastmcp.apps import AppConfig
 from fastmcp.apps.config import app_config_to_meta_dict
 from fastmcp.tools.function_tool import FunctionTool
 from mcp.types import Tool as MCPTool
@@ -32,11 +32,6 @@ _REVOKE_URL = os.environ.get(
     "https://api.goprofiles.io/oauth/revoke",
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
-# Stable unique origin for the Bravo preview widget sandbox (required for ChatGPT
-# app submission). Override if you host widgets under another hostname.
-_WIDGET_DOMAIN = os.environ.get(
-    "GOPROFILES_MCP_WIDGET_DOMAIN", "https://bravo-preview.mcp.goprofiles.io"
-)
 
 # Union of scopes this server may request. Individual tools declare a subset via
 # securitySchemes — without that, ChatGPT treats every tool as needing all of these.

@@ -189,7 +189,7 @@ def _format_person(p: PersonResult, *, show: set[str], show_match: bool) -> str:
         f"Title:      {p.title or 'Unknown'}",
         f"Department: {p.department_name or 'Unknown'}",
         f"Location:   {p.location or 'Unknown'}",
-        # uid is for get_profile / prepare_bravo — never repeat it in user-facing replies.
+        # uid is for follow-up tool calls — never repeat it in user-facing replies.
         f"uid:        {p.uid}  (tool use only — do not show to the user)",
     ]
 
@@ -520,10 +520,9 @@ async def search_people(
     several people match, and ask the user which one they meant rather than
     guessing between two plausible matches.
 
-    The 'uid' is an internal id for calling get_profile, prepare_bravo (as
-    receiver_uid), and similar tools. Never show, read aloud, or otherwise expose
-    'uid' values to the user; refer to people by name, username, title, or
-    department instead.
+    The 'uid' is an internal id for calling get_profile and similar tools. Never
+    show, read aloud, or otherwise expose 'uid' values to the user; refer to
+    people by name, username, title, or department instead.
 
     Name matching is substring-based, not fuzzy, so pass several spelling and
     shortening variants in 'names' at once. Results are ranked best-first and each
@@ -606,7 +605,7 @@ async def search_people(
     if names and len(data.results) > 1:
         footer = (
             "\n\nMultiple people matched. Use title/department/location to pick the "
-            "right uid for get_profile or prepare_bravo, and confirm with the user "
+            "right uid for get_profile, and confirm with the user "
             "if the match is ambiguous. Do not show uid values to the user."
         )
     return header + "\n\n".join(entries) + footer
