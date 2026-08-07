@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import search_bravo_types
+from goprofiles_mcp.tools.bravos import create_bravo, search_bravo_types
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -35,7 +35,14 @@ _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.i
 
 # Union of scopes this server may request. Individual tools declare a subset via
 # securitySchemes — without that, ChatGPT treats every tool as needing all of these.
-_SCOPES = ["profiles:read", "profiles:write", "search:read", "users:read"]
+_SCOPES = [
+    "profiles:read",
+    "profiles:write",
+    "search:read",
+    "users:read",
+    "bravos:read",
+    "bravos:write",
+]
 # ChatGPT domain verification for mcp.goprofiles.io — same role as golinks-mcp's
 # hardcoded token. Set via ECS env, or paste the token ChatGPT shows when verifying
 # the connector domain.
@@ -146,7 +153,7 @@ mcp.add_tool(
 mcp.add_tool(
     _oauth2_tool(
         search_bravo_types,
-        scopes=["search:read"],
+        scopes=["bravos:read"],
         title="Search bravo types",
         invoking="Searching bravo types…",
         invoked="Bravo types ready",
@@ -156,6 +163,30 @@ mcp.add_tool(
             destructiveHint=False,
             idempotentHint=True,
             openWorldHint=False,
+        ),
+    )
+)
+
+# No `app=AppConfig(...)` here, deliberately: that emits `_meta.ui`, which made
+# ChatGPT drop the tool at discovery rather than error. Keep this registration
+# shaped exactly like the read-only tools above.
+mcp.add_tool(
+    _oauth2_tool(
+        create_bravo,
+        # bravos:read is required so create_bravo can verify bid against GET /bravos.php.
+        scopes=["bravos:write", "bravos:read"],
+        title="Create bravo",
+        invoking="Sending Bravo…",
+        invoked="Bravo finished",
+        annotations=ToolAnnotations(
+            title="Create bravo",
+            readOnlyHint=False,
+            # A Bravo destroys nothing, but it is irreversible and notifies a
+            # coworker. Hosts key extra approval friction off this hint, and on a
+            # client with no elicitation that prompt is part of the gate.
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
         ),
     )
 )

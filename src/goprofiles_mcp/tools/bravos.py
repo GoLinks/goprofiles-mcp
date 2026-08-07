@@ -1,11 +1,8 @@
-"""Bravo tools — badge catalog search."""
+"""Bravo tools — badge catalog search and confirmed Bravo creation."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
-import os
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 from fastmcp import Context
@@ -17,12 +14,9 @@ from goprofiles_mcp.client import (
     http_client,
     raise_for_status,
 )
+from goprofiles_mcp.confirmations import ClaimStatus, claim, stage
 
-# Tokens are only printed by search_bravo_types, so a caller holding one proves
-# it read this tool's output rather than inventing a badge.
-_BADGE_TOKEN_SECRET = os.environ.get(
-    "GOPROFILES_MCP_BADGE_TOKEN_SECRET", "goprofiles-mcp-badge-token"
-)
+_TOOL = "create_bravo"
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -37,6 +31,16 @@ class BravoTypeResult(BaseModel):
 
 class BravoTypesResponse(BaseModel):
     results: list[BravoTypeResult] = []
+
+
+class CreateBravoResponse(BaseModel):
+    status: str = ""
+    message: str = ""
+    successful_count: int = 0
+    failed_count: int = 0
+    total_count: int = 0
+    comment_id: int | None = None
+    scheduled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -64,27 +68,47 @@ def _match_score(badge: BravoTypeResult, query: str) -> int | None:
     return None
 
 
-def _badge_token(bid: int, name: str) -> str:
-    """Opaque token proving bid/name came from search_bravo_types output."""
-    payload = f"{bid}\n{name.strip().lower()}".encode()
-    digest = hmac.new(
-        _BADGE_TOKEN_SECRET.encode(),
-        payload,
-        hashlib.sha256,
-    ).hexdigest()
-    return digest[:24]
-
-
 def _format_bravo_type(b: BravoTypeResult) -> str:
-    token = _badge_token(b.bid, b.name)
     lines = [
         f"Name:        {b.name or 'Unknown'}",
         f"Description: {b.description or 'None'}",
-        # bid / badge_token are for follow-up tool calls — never show to the user.
+        # bid is for follow-up tool calls — never show it to the user.
         f"bid:         {b.bid}  (tool use only — do not show to the user)",
-        f"badge_token: {token}  (tool use only — do not show to the user)",
     ]
     return "\n".join(lines)
+
+
+async def _recipient_name(uid: int, authorization: str) -> str | None:
+    """Confirm a uid exists and return a display name, or None if it doesn't.
+
+    Same two-layer check get_profile uses: /users.php 404s via LookupError, but
+    it can also answer 200 with a body that carries no uid.
+    """
+    params = external_params({"uid": uid}, tool=_TOOL)
+
+    try:
+        response = await http_client.get(
+            "/users.php",
+            params=params,
+            headers={"Authorization": authorization},
+        )
+    except httpx.TimeoutException:
+        raise TimeoutError("Request to GoProfiles API timed out.")
+    except httpx.ConnectError:
+        raise ConnectionError("Failed to connect to GoProfiles API.")
+
+    try:
+        raise_for_status(response, "/users.php")
+    except LookupError:
+        return None
+
+    raw = response.json()
+    if not isinstance(raw, dict) or not raw.get("uid"):
+        return None
+
+    first = str(raw.get("first_name") or "").strip()
+    last = str(raw.get("last_name") or "").strip()
+    return f"{first} {last}".strip() or str(raw.get("username") or "").strip() or "Unknown"
 
 
 async def _fetch_bravo_types(authorization: str, *, tool: str) -> list[BravoTypeResult]:
@@ -143,16 +167,16 @@ async def search_bravo_types(
     memory, or examples. Badge ids (bid) are workspace-specific and must come
     from this tool's output.
 
-    Returns each badge type's name, description, a numeric 'bid', and a
-    badge_token.
+    Returns each badge type's name, description, and a numeric 'bid' for
+    create_bravo.
 
     After results return, list the badge Name(s) to the user and ask which bravo
     type they want — even when there is only one match.
 
-    The 'bid' and 'badge_token' are internal. Never show, read aloud, or
-    otherwise expose them to the user; refer to badge types by name.
+    The 'bid' is internal. Never show, read aloud, or otherwise expose it to the
+    user; refer to badge types by name.
 
-    Read-only. Requires search:read scope.
+    Read-only. Requires bravos:read scope.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
@@ -195,6 +219,204 @@ async def search_bravo_types(
         )
         + "\n"
         "Do not invent or reuse values that did not appear above. Do not show "
-        "bid or badge_token to the user."
+        "bid values to the user."
     )
     return header + "\n\n".join(entries) + footer
+
+
+async def create_bravo(
+    receiver_uid: Annotated[
+        int,
+        Field(
+            description=(
+                "Numeric user id of the recipient, from search_people in THIS "
+                "conversation. Pass the uid only — never show it to the user. The "
+                "sender is always the authenticated user; there is no sender "
+                "parameter and you must not invent one."
+            ),
+            ge=1,
+        ),
+    ],
+    bid: Annotated[
+        int,
+        Field(
+            description=(
+                "Numeric badge type id from search_bravo_types in THIS "
+                "conversation. Never invent a bid or reuse one from another chat, "
+                "memory, or examples. Never show it to the user."
+            ),
+            ge=1,
+        ),
+    ],
+    comment: Annotated[
+        str,
+        Field(
+            description=(
+                "The recognition message to send (max 850 characters). Ask the "
+                "user whether to draft this or whether they will supply it — never "
+                "invent a message and send it without showing them first."
+            ),
+            min_length=1,
+            max_length=850,
+        ),
+    ],
+    confirmation_token: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Omit on the first call: the Bravo is validated and previewed, and "
+                "nothing is sent. Then show the user the preview and WAIT for them "
+                "to explicitly approve it. Only after they say to send, call this "
+                "tool again with the identical receiver_uid, bid, and comment plus "
+                "the confirmation_token from the preview. The user asking for a "
+                "Bravo is not approval of its contents."
+            ),
+        ),
+    ] = None,
+    ctx: Context | None = None,
+) -> str:
+    """Send a Bravo (peer recognition) to a coworker in GoProfiles
+    (https://www.goprofiles.io), on behalf of the authenticated user.
+
+    Takes two calls and cannot send in one. The first call validates the badge
+    and recipient, then returns a preview plus a confirmation_token without
+    sending anything. The second call, with that token and the same arguments,
+    sends it. Show the user the preview and get their explicit approval between
+    the two calls.
+
+    The sender is always the authenticated user, derived from the access token.
+
+    Required workflow:
+    1. search_people to resolve the recipient to a uid.
+    2. search_bravo_types; ask the user which badge name to use.
+    3. Agree the message with the user.
+    4. Call create_bravo without a token to get the preview.
+    5. Show the preview, wait for explicit approval, then call again with the token.
+
+    Not read-only and not reversible — it notifies the recipient. Requires
+    bravos:write and bravos:read scopes.
+    """
+    if ctx is None:
+        raise PermissionError("Missing request context.")
+    authorization = get_authorization_header(ctx)
+
+    comment = comment.strip()
+    if not comment:
+        return (
+            "No Bravo sent — the message is empty. Ask the user what they want it "
+            "to say, or offer to draft something for their review."
+        )
+
+    badges = await _fetch_bravo_types(authorization, tool=_TOOL)
+    badge = next((b for b in badges if b.bid == bid), None)
+    if badge is None:
+        return (
+            "No Bravo sent — that badge type is not in this workspace's catalog. "
+            "Call search_bravo_types in THIS conversation and use a bid from its "
+            "results. Do not reuse bids from other chats, memory, or examples."
+        )
+
+    recipient = await _recipient_name(receiver_uid, authorization)
+    if recipient is None:
+        return (
+            "No Bravo sent — no person found with that uid. Confirm the recipient "
+            "with search_people and try again with the uid from its results."
+        )
+
+    payload: dict[str, Any] = {
+        "receiver_uid": receiver_uid,
+        "bid": bid,
+        "comment": comment,
+    }
+
+    if not confirmation_token:
+        token = stage(tool=_TOOL, payload=payload)
+        return (
+            "Bravo previewed — NOT sent.\n\n"
+            f"To:      {recipient}\n"
+            f"Badge:   {badge.name}\n"
+            "Message:\n"
+            f"{comment}\n\n"
+            f"confirmation_token: {token}  (tool use only — do not show to the user)\n\n"
+            "NEXT STEP — show the user the To / Badge / Message above and ask them "
+            "to confirm. Do not call create_bravo again until they explicitly say "
+            "to send it. When they do, call it with the same receiver_uid, bid, and "
+            "comment plus this confirmation_token."
+        )
+
+    result = await claim(
+        ctx,
+        confirmation_token,
+        tool=_TOOL,
+        payload=payload,
+        summary=(
+            "Send this Bravo?\n\n"
+            f"To: {recipient}\n"
+            f"Badge: {badge.name}\n\n"
+            f"{comment}"
+        ),
+    )
+    if result.status is ClaimStatus.DECLINED:
+        return (
+            "No Bravo sent — the user declined. Ask what they'd like to change, "
+            "then preview a new one with create_bravo if they still want to send "
+            "it. The confirmation_token is still valid if they only need a moment."
+        )
+    if result.status is ClaimStatus.DRIFTED:
+        return (
+            "No Bravo sent — the recipient, badge, or message does not match what "
+            "was previewed. Send exactly what the user approved, or call "
+            "create_bravo without a token to preview the new version and get their "
+            "approval again. This token is still valid."
+        )
+    if result.status is ClaimStatus.EXPIRED:
+        return (
+            "No Bravo sent — the confirmation expired. Call create_bravo without a "
+            "token to preview it again, then re-confirm with the user."
+        )
+    if not result.ok:
+        return (
+            "No Bravo sent — that confirmation_token is not valid. It may already "
+            "have been used (check whether the Bravo was sent before retrying). "
+            "Call create_bravo without a token to preview a fresh one."
+        )
+
+    # Send the staged payload, never the resubmitted arguments.
+    sending = result.payload or payload
+    params = external_params(tool=_TOOL)
+    try:
+        response = await http_client.post(
+            "/bravos.php",
+            params=params,
+            data={
+                "bid": sending["bid"],
+                "comment": sending["comment"],
+                "receiver_uids[]": sending["receiver_uid"],
+            },
+            headers={"Authorization": authorization},
+        )
+    except httpx.TimeoutException:
+        raise TimeoutError("Request to GoProfiles API timed out.")
+    except httpx.ConnectError:
+        raise ConnectionError("Failed to connect to GoProfiles API.")
+
+    raise_for_status(response, "/bravos.php")
+    data = CreateBravoResponse.model_validate(response.json())
+
+    if data.status == "failed" or data.successful_count == 0:
+        detail = data.message.strip() or "The Bravo could not be sent."
+        return (
+            f"Failed to send Bravo. {detail} Preview a new one with create_bravo "
+            "after confirming the recipient and badge with the user."
+        )
+
+    lines = [
+        data.message.strip() or "Bravo sent successfully.",
+        f"Badge:      {badge.name}",
+        f"To:         {recipient}",
+    ]
+    if data.failed_count:
+        lines.append(f"Failed:     {data.failed_count}")
+    if data.scheduled:
+        lines.append("Note:       This Bravo was scheduled for later delivery.")
+    return "\n".join(lines)
