@@ -32,7 +32,7 @@ The MCP server forwards that header to `api.goprofiles.io`. GoProfiles remains r
 
 An OAuth client must be pre-registered in your GoProfiles workspace with:
 
-- Allowed scopes: *(define when tools are added)*
+- Allowed scopes: `profiles:read`, `profiles:write`, `search:read`, `users:read`, `bravos:read`, `bravos:write`
 - Redirect URIs: the exact callback URL(s) your MCP client uses
 
 ## Local Development
