@@ -14,14 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import (
-    BRAVO_PREVIEW_URI,
-    PREPARE_BRAVO_OUTPUT_SCHEMA,
-    bravo_preview_html,
-    prepare_bravo,
-    search_bravo_types,
-    send_bravo,
-)
+from goprofiles_mcp.tools.bravos import search_bravo_types
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -121,21 +114,6 @@ def _oauth2_tool(
 
 mcp = fastmcp.FastMCP("GoProfiles")
 
-# Confirmation widget for prepare_bravo. The card is text-only, so the CSP only
-# needs the ext-apps JS origin.
-# `domain` is required by ChatGPT for a unique widget sandbox / app submission.
-@mcp.resource(
-    BRAVO_PREVIEW_URI,
-    app=AppConfig(
-        domain=_WIDGET_DOMAIN,
-        csp=ResourceCSP(resource_domains=["https://unpkg.com"]),
-        prefers_border=True,
-    ),
-)
-def bravo_preview_resource() -> str:
-    return bravo_preview_html()
-
-
 mcp.add_tool(
     _oauth2_tool(
         search_people,
@@ -186,53 +164,6 @@ mcp.add_tool(
         ),
     )
 )
-
-mcp.add_tool(
-    _oauth2_tool(
-        prepare_bravo,
-        scopes=["search:read"],
-        title="Prepare bravo",
-        invoking="Preparing Bravo draft…",
-        invoked="Bravo draft ready",
-        output_schema=PREPARE_BRAVO_OUTPUT_SCHEMA,
-        app=AppConfig(
-            resource_uri=BRAVO_PREVIEW_URI,
-            visibility=["model", "app"],
-        ),
-        annotations=ToolAnnotations(
-            title="Prepare bravo",
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=False,
-            openWorldHint=False,
-        ),
-    )
-)
-
-mcp.add_tool(
-    _oauth2_tool(
-        send_bravo,
-        scopes=["profiles:write"],
-        title="Send bravo",
-        invoking="Sending Bravo…",
-        invoked="Bravo finished",
-        # Model-visible so clients without the preview widget (Claude, GoSearch)
-        # can complete the flow; the widget Send button also calls it.
-        app=AppConfig(visibility=["model", "app"]),
-        annotations=ToolAnnotations(
-            title="Send bravo",
-            readOnlyHint=False,
-            # A Bravo destroys nothing, but it is irreversible and notifies a
-            # coworker. Hosts key extra approval friction off this hint, and a
-            # guaranteed confirmation prompt matters more here than a literal
-            # reading of "destructive".
-            destructiveHint=True,
-            idempotentHint=False,
-            openWorldHint=True,
-        ),
-    )
-)
-
 
 class RequireBearerOnMCP(BaseHTTPMiddleware):
     """Return 401 + WWW-Authenticate on /mcp when no Bearer token is present.
