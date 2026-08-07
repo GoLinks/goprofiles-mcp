@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 import httpx
 from fastmcp import Context
@@ -170,8 +170,9 @@ async def search_bravo_types(
     Returns each badge type's name, description, and a numeric 'bid' for
     create_bravo.
 
-    After results return, list the badge Name(s) to the user and ask which bravo
-    type they want — even when there is only one match.
+    After results return, ask the user for everything still missing in one
+    message — which badge (unless they already named one of the matches) and what
+    the recognition message should say. Do not ask for these one turn at a time.
 
     The 'bid' is internal. Never show, read aloud, or otherwise expose it to the
     user; refer to badge types by name.
@@ -208,23 +209,25 @@ async def search_bravo_types(
     name_list = ", ".join(f"'{n}'" for n in names)
     header = f"Bravo badge types ({len(matches)} of {total} matched):\n"
     entries = [f"[{i}]\n{_format_bravo_type(b)}" for i, b in enumerate(matches, 1)]
+    # Ask for everything still missing in ONE turn. Asking for the badge and the
+    # message in separate turns made a three-field action take four exchanges.
     footer = (
-        "\n\nNext step:\n"
-        f"1. Tell the user these matching bravo type name(s): {name_list}.\n"
-        "2. Ask which one they want to use"
-        + (
-            " (or confirm the single match)."
-            if len(matches) == 1
-            else ", and wait for their choice."
-        )
-        + "\n"
+        "\n\nNext step — ask for everything you still need in a SINGLE message:\n"
+        f"- Matching bravo type name(s): {name_list}.\n"
+        "- If the user already named one of these badges, treat that as their "
+        "choice and do NOT ask them to confirm it again.\n"
+        "- Otherwise ask which one they want.\n"
+        "- In the same message, unless they already gave you the recognition "
+        "message, ask what it should say (and offer to draft one).\n"
+        "Once you have the recipient, the badge, and the message, call "
+        "preview_bravo once.\n"
         "Do not invent or reuse values that did not appear above. Do not show "
         "bid values to the user."
     )
     return header + "\n\n".join(entries) + footer
 
 
-async def create_bravo(
+async def preview_bravo(
     receiver_uid: Annotated[
         int,
         Field(
@@ -252,49 +255,31 @@ async def create_bravo(
         str,
         Field(
             description=(
-                "The recognition message to send (max 850 characters). Ask the "
-                "user whether to draft this or whether they will supply it — never "
-                "invent a message and send it without showing them first."
+                "The recognition message to send (max 850 characters). Agree this "
+                "with the user before calling — either they supply it or you draft "
+                "it for their review."
             ),
             min_length=1,
             max_length=850,
         ),
     ],
-    confirmation_token: Annotated[
-        str | None,
-        Field(
-            description=(
-                "Omit on the first call: the Bravo is validated and previewed, and "
-                "nothing is sent. Then show the user the preview and WAIT for them "
-                "to explicitly approve it. Only after they say to send, call this "
-                "tool again with the identical receiver_uid, bid, and comment plus "
-                "the confirmation_token from the preview. The user asking for a "
-                "Bravo is not approval of its contents."
-            ),
-        ),
-    ] = None,
     ctx: Context | None = None,
 ) -> str:
-    """Send a Bravo (peer recognition) to a coworker in GoProfiles
-    (https://www.goprofiles.io), on behalf of the authenticated user.
+    """Preview a Bravo before sending it. Sends nothing.
 
-    Takes two calls and cannot send in one. The first call validates the badge
-    and recipient, then returns a preview plus a confirmation_token without
-    sending anything. The second call, with that token and the same arguments,
-    sends it. Show the user the preview and get their explicit approval between
-    the two calls.
+    Resolves the recipient and badge to their real names, checks both exist, and
+    returns a preview plus a confirmation_token for create_bravo. Nothing is sent
+    and nothing is notified.
 
-    The sender is always the authenticated user, derived from the access token.
+    Call this once you have all three of: the recipient, the badge, and the
+    message. Gather the badge and the message together in a single question
+    rather than one at a time — do not call this tool with a message you invented
+    and have not shown the user.
 
-    Required workflow:
-    1. search_people to resolve the recipient to a uid.
-    2. search_bravo_types; ask the user which badge name to use.
-    3. Agree the message with the user.
-    4. Call create_bravo without a token to get the preview.
-    5. Show the preview, wait for explicit approval, then call again with the token.
+    Then show the user the To / Badge / Message from the result and wait for them
+    to explicitly approve it. Only after that, call create_bravo.
 
-    Not read-only and not reversible — it notifies the recipient. Requires
-    bravos:write and bravos:read scopes.
+    Read-only. Requires bravos:read and profiles:read scopes.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
@@ -303,86 +288,170 @@ async def create_bravo(
     comment = comment.strip()
     if not comment:
         return (
-            "No Bravo sent — the message is empty. Ask the user what they want it "
-            "to say, or offer to draft something for their review."
+            "No preview — the message is empty. Ask the user what they want it to "
+            "say, or offer to draft something for their review."
         )
 
-    badges = await _fetch_bravo_types(authorization, tool=_TOOL)
+    badges = await _fetch_bravo_types(authorization, tool="preview_bravo")
     badge = next((b for b in badges if b.bid == bid), None)
     if badge is None:
         return (
-            "No Bravo sent — that badge type is not in this workspace's catalog. "
-            "Call search_bravo_types in THIS conversation and use a bid from its "
+            "No preview — that badge type is not in this workspace's catalog. Call "
+            "search_bravo_types in THIS conversation and use a bid from its "
             "results. Do not reuse bids from other chats, memory, or examples."
         )
 
     recipient = await _recipient_name(receiver_uid, authorization)
     if recipient is None:
         return (
-            "No Bravo sent — no person found with that uid. Confirm the recipient "
+            "No preview — no person found with that uid. Confirm the recipient "
             "with search_people and try again with the uid from its results."
         )
 
-    payload: dict[str, Any] = {
-        "receiver_uid": receiver_uid,
-        "bid": bid,
-        "comment": comment,
-    }
+    token = stage(
+        tool=_TOOL,
+        # Executed on ids the model never resends, so the send call cannot be
+        # redirected to a different person or badge.
+        payload={"receiver_uid": receiver_uid, "bid": bid, "comment": comment},
+        confirm_args={
+            "recipient_name": recipient,
+            "badge_name": badge.name,
+            "comment": comment,
+        },
+    )
 
-    if not confirmation_token:
-        token = stage(tool=_TOOL, payload=payload)
-        return (
-            "Bravo previewed — NOT sent.\n\n"
-            f"To:      {recipient}\n"
-            f"Badge:   {badge.name}\n"
-            "Message:\n"
-            f"{comment}\n\n"
-            f"confirmation_token: {token}  (tool use only — do not show to the user)\n\n"
-            "NEXT STEP — show the user the To / Badge / Message above and ask them "
-            "to confirm. Do not call create_bravo again until they explicitly say "
-            "to send it. When they do, call it with the same receiver_uid, bid, and "
-            "comment plus this confirmation_token."
-        )
+    return (
+        "Bravo previewed — NOT sent.\n\n"
+        f"To:      {recipient}\n"
+        f"Badge:   {badge.name}\n"
+        "Message:\n"
+        f"{comment}\n\n"
+        f"confirmation_token: {token}  (tool use only — do not show to the user)\n\n"
+        "NEXT STEP — show the user the To / Badge / Message above and ask them to "
+        "confirm. Do not call create_bravo until they explicitly say to send it. "
+        "When they do, call create_bravo with recipient_name, badge_name, and "
+        "comment copied exactly from this preview, plus this confirmation_token. "
+        "create_bravo takes no uid or bid."
+    )
+
+
+async def create_bravo(
+    recipient_name: Annotated[
+        str,
+        Field(
+            description=(
+                "The recipient's name exactly as it appeared in the preview_bravo "
+                "result ('To:'). Copy it verbatim. This is shown to the user when "
+                "they approve the send, and is checked against the preview."
+            ),
+            min_length=1,
+        ),
+    ],
+    badge_name: Annotated[
+        str,
+        Field(
+            description=(
+                "The badge name exactly as it appeared in the preview_bravo result "
+                "('Badge:'). Copy it verbatim — checked against the preview."
+            ),
+            min_length=1,
+        ),
+    ],
+    comment: Annotated[
+        str,
+        Field(
+            description=(
+                "The recognition message exactly as it appeared in the "
+                "preview_bravo result ('Message:'). Copy it verbatim — checked "
+                "against the preview. Do not shorten, summarize, or reword it."
+            ),
+            min_length=1,
+            max_length=850,
+        ),
+    ],
+    confirmation_token: Annotated[
+        str,
+        Field(
+            description=(
+                "The confirmation_token from preview_bravo. Required — there is no "
+                "way to send a Bravo without previewing it first. Never show it to "
+                "the user."
+            ),
+            min_length=1,
+        ),
+    ],
+    ctx: Context | None = None,
+) -> str:
+    """Send a Bravo (peer recognition) that the user has already approved.
+
+    ONLY call this after preview_bravo and after the user has explicitly said to
+    send that preview. The user asking for a Bravo is not approval of its
+    contents — they must approve the actual recipient, badge, and message first.
+
+    Sends the recipient and badge resolved by preview_bravo, so this tool takes
+    no uid or bid: the arguments here are the human-readable values the user
+    approved, and they are checked against the preview rather than sent.
+
+    The sender is always the authenticated user, derived from the access token.
+
+    Not read-only and not reversible — it notifies the recipient. Requires
+    bravos:write and profiles:read scopes.
+    """
+    if ctx is None:
+        raise PermissionError("Missing request context.")
+    authorization = get_authorization_header(ctx)
 
     result = await claim(
         ctx,
         confirmation_token,
         tool=_TOOL,
-        payload=payload,
+        confirm_args={
+            "recipient_name": recipient_name,
+            "badge_name": badge_name,
+            "comment": comment.strip(),
+        },
         summary=(
             "Send this Bravo?\n\n"
-            f"To: {recipient}\n"
-            f"Badge: {badge.name}\n\n"
-            f"{comment}"
+            f"To: {recipient_name}\n"
+            f"Badge: {badge_name}\n\n"
+            f"{comment.strip()}"
         ),
     )
+
     if result.status is ClaimStatus.DECLINED:
         return (
-            "No Bravo sent — the user declined. Ask what they'd like to change, "
-            "then preview a new one with create_bravo if they still want to send "
-            "it. The confirmation_token is still valid if they only need a moment."
+            "No Bravo sent — the user declined. Ask what they'd like to change. "
+            "The confirmation_token is still valid if they only needed a moment; "
+            "otherwise call preview_bravo again with the new details."
         )
     if result.status is ClaimStatus.DRIFTED:
         return (
-            "No Bravo sent — the recipient, badge, or message does not match what "
-            "was previewed. Send exactly what the user approved, or call "
-            "create_bravo without a token to preview the new version and get their "
-            "approval again. This token is still valid."
+            "No Bravo sent — the recipient, badge, or message does not match the "
+            "preview. Copy recipient_name, badge_name, and comment verbatim from "
+            "the preview_bravo result, or call preview_bravo again if the user "
+            "wants different content. This token is still valid."
         )
     if result.status is ClaimStatus.EXPIRED:
         return (
-            "No Bravo sent — the confirmation expired. Call create_bravo without a "
-            "token to preview it again, then re-confirm with the user."
+            "No Bravo sent — the confirmation expired. Call preview_bravo again, "
+            "then re-confirm with the user."
         )
     if not result.ok:
         return (
             "No Bravo sent — that confirmation_token is not valid. It may already "
             "have been used (check whether the Bravo was sent before retrying). "
-            "Call create_bravo without a token to preview a fresh one."
+            "Call preview_bravo to get a fresh one."
         )
 
-    # Send the staged payload, never the resubmitted arguments.
-    sending = result.payload or payload
+    # Everything below comes from the staged payload, never from the arguments.
+    sending = result.payload or {}
+
+    if await _recipient_name(sending["receiver_uid"], authorization) is None:
+        return (
+            "No Bravo sent — that person no longer exists in GoProfiles. Confirm "
+            "the recipient with search_people and preview a new Bravo."
+        )
+
     params = external_params(tool=_TOOL)
     try:
         response = await http_client.post(
@@ -406,14 +475,14 @@ async def create_bravo(
     if data.status == "failed" or data.successful_count == 0:
         detail = data.message.strip() or "The Bravo could not be sent."
         return (
-            f"Failed to send Bravo. {detail} Preview a new one with create_bravo "
-            "after confirming the recipient and badge with the user."
+            f"Failed to send Bravo. {detail} Call preview_bravo again after "
+            "confirming the recipient and badge with the user."
         )
 
     lines = [
         data.message.strip() or "Bravo sent successfully.",
-        f"Badge:      {badge.name}",
-        f"To:         {recipient}",
+        f"Badge:      {badge_name}",
+        f"To:         {recipient_name}",
     ]
     if data.failed_count:
         lines.append(f"Failed:     {data.failed_count}")

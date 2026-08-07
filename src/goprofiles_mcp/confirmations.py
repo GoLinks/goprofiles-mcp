@@ -58,7 +58,8 @@ class ClaimStatus(Enum):
 @dataclass
 class PendingWrite:
     tool: str
-    payload: dict[str, Any]
+    payload: dict[str, Any]  # what to execute
+    confirm_args: dict[str, Any]  # what the caller must resubmit
     expires_at: float
 
 
@@ -96,23 +97,34 @@ def stage(
     *,
     tool: str,
     payload: dict[str, Any],
+    confirm_args: dict[str, Any],
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> str:
-    """Store a pending write and return its opaque single-use token."""
+    """Store a pending write and return its opaque single-use token.
+
+    ``payload`` is what will be executed. ``confirm_args`` is what the caller
+    will resubmit on the confirming call, and is the only thing compared.
+
+    Keeping them separate lets a tool execute on resolved internal ids while
+    confirming on human-readable values — so the host's approval prompt shows
+    the user a name rather than a number, and the confirming call has no
+    parameter capable of redirecting the write.
+    """
     token = uuid.uuid4().hex
     now = time.time()
     with _lock:
         _purge_expired_unlocked(now)
         _pending[token] = PendingWrite(
             tool=tool,
-            payload=_normalize(payload),
+            payload=payload,
+            confirm_args=_normalize(confirm_args),
             expires_at=now + ttl_seconds,
         )
     return token
 
 
 def _validate_unlocked(
-    key: str, *, tool: str, payload: dict[str, Any], now: float
+    key: str, *, tool: str, confirm_args: dict[str, Any], now: float
 ) -> ClaimResult:
     pending = _pending.get(key)
     if pending is None:
@@ -122,7 +134,7 @@ def _validate_unlocked(
         return ClaimResult(ClaimStatus.EXPIRED)
     if pending.tool != tool:
         return ClaimResult(ClaimStatus.WRONG_TOOL)
-    if _normalize(payload) != pending.payload:
+    if _normalize(confirm_args) != pending.confirm_args:
         return ClaimResult(ClaimStatus.DRIFTED)
     return ClaimResult(ClaimStatus.OK, payload=pending.payload)
 
@@ -132,16 +144,16 @@ async def claim(
     token: str,
     *,
     tool: str,
-    payload: dict[str, Any],
+    confirm_args: dict[str, Any],
     summary: str,
 ) -> ClaimResult:
     """Validate a token, confirm with the user, and consume it — in that order.
 
-    Returns the payload that was staged, which is what the caller should act on;
-    the resubmitted ``payload`` is only ever compared, never used.
+    Returns the staged ``payload``, which is what the caller should act on. The
+    resubmitted ``confirm_args`` are only ever compared, never executed.
 
-    The entry is consumed **only** on a fully approved claim. A drifted payload,
-    a declined confirmation, or a crash mid-flight all leave it usable so a
+    The entry is consumed **only** on a fully approved claim. Drifted args, a
+    declined confirmation, or a crash mid-flight all leave it usable so a
     corrected retry works with the same token. Validation, confirmation, and
     consumption live in one call precisely so a caller cannot get that ordering
     wrong: confirming after consuming would burn the token on every decline.
@@ -149,7 +161,9 @@ async def claim(
     key = token.strip()
 
     with _lock:
-        result = _validate_unlocked(key, tool=tool, payload=payload, now=time.time())
+        result = _validate_unlocked(
+            key, tool=tool, confirm_args=confirm_args, now=time.time()
+        )
     if not result.ok:
         return result
 
@@ -159,7 +173,9 @@ async def claim(
     # Re-validate under the lock before consuming: the elicitation above is an
     # await, so the entry could have expired or been consumed while we waited.
     with _lock:
-        result = _validate_unlocked(key, tool=tool, payload=payload, now=time.time())
+        result = _validate_unlocked(
+            key, tool=tool, confirm_args=confirm_args, now=time.time()
+        )
         if result.ok:
             del _pending[key]
     return result

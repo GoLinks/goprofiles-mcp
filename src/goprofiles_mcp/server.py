@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import create_bravo, search_bravo_types
+from goprofiles_mcp.tools.bravos import create_bravo, preview_bravo, search_bravo_types
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -167,14 +167,35 @@ mcp.add_tool(
     )
 )
 
+# Read-only so hosts do not prompt: this stages and previews but sends nothing.
+# Splitting it out of create_bravo is what reduces the flow to a single write
+# approval instead of one on each call of a single write-annotated tool.
+# bravos:read verifies the bid; profiles:read verifies the recipient uid.
+mcp.add_tool(
+    _oauth2_tool(
+        preview_bravo,
+        scopes=["bravos:read", "profiles:read"],
+        title="Preview bravo",
+        invoking="Preparing Bravo preview…",
+        invoked="Bravo preview ready",
+        annotations=ToolAnnotations(
+            title="Preview bravo",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+)
+
 # No `app=AppConfig(...)` here, deliberately: that emits `_meta.ui`, which made
 # ChatGPT drop the tool at discovery rather than error. Keep this registration
 # shaped exactly like the read-only tools above.
+# profiles:read re-verifies the recipient still exists immediately before sending.
 mcp.add_tool(
     _oauth2_tool(
         create_bravo,
-        # bravos:read is required so create_bravo can verify bid against GET /bravos.php.
-        scopes=["bravos:write", "bravos:read"],
+        scopes=["bravos:write", "profiles:read"],
         title="Create bravo",
         invoking="Sending Bravo…",
         invoked="Bravo finished",
