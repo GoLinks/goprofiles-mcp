@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 import os
-from typing import Annotated, Any
+from typing import Annotated
 
 import httpx
 from fastmcp import Context
@@ -52,6 +52,22 @@ class CreateBravoResponse(BaseModel):
     total_count: int = 0
     comment_id: int | None = None
     scheduled: bool = False
+
+
+class BravoDraftPreview(BaseModel):
+    """structuredContent from prepare_bravo (widget + model)."""
+
+    draft_id: str = Field(description="Opaque draft id for send_bravo (tool use only).")
+    recipient_label: str = Field(description="Display name of the recipient.")
+    badge_name: str = Field(description="Verified Bravo badge type name.")
+    message: str = Field(description="Recognition message that will be sent.")
+    image_url: str = Field(
+        default="",
+        description="CloudFront badge image URL for the preview card, if any.",
+    )
+
+
+PREPARE_BRAVO_OUTPUT_SCHEMA = BravoDraftPreview.model_json_schema()
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +559,7 @@ async def prepare_bravo(
         ),
     ] = None,
     ctx: Context | None = None,
-) -> ToolResult | str:
+) -> ToolResult:
     """Prepare a Bravo draft for user confirmation (does NOT send).
 
     Validates the badge against the live catalog, stores a short-lived draft,
@@ -566,19 +582,22 @@ async def prepare_bravo(
     badges = await _fetch_bravo_types(authorization, tool="prepare_bravo")
     resolved = _validate_badge(badges, bid, badge_name)
     if isinstance(resolved, str):
-        return resolved
+        return ToolResult(content=resolved, is_error=True)
 
     token_error = _validate_badge_token(resolved.bid, resolved.name, badge_token)
     if token_error is not None:
-        return token_error
+        return ToolResult(content=token_error, is_error=True)
 
     if not message or not message.strip():
-        return (
-            "Message is required before preparing a draft. Ask the user whether "
-            "they want you to draft a recognition message for their review, or "
-            "provide the text themselves. Do not invent a message without asking. "
-            "After the text is ready, call prepare_bravo again with that message "
-            "and the same bid/badge_name/badge_token from search_bravo_types."
+        return ToolResult(
+            content=(
+                "Message is required before preparing a draft. Ask the user whether "
+                "they want you to draft a recognition message for their review, or "
+                "provide the text themselves. Do not invent a message without asking. "
+                "After the text is ready, call prepare_bravo again with that message "
+                "and the same bid/badge_name/badge_token from search_bravo_types."
+            ),
+            is_error=True,
         )
 
     message = message.strip()
@@ -594,13 +613,14 @@ async def prepare_bravo(
         recipient_label=recipient_label,
     )
 
-    payload: dict[str, Any] = {
-        "draft_id": draft_id,
-        "recipient_label": recipient_label,
-        "badge_name": resolved.name,
-        "message": message,
-        "image_url": image_url,
-    }
+    preview = BravoDraftPreview(
+        draft_id=draft_id,
+        recipient_label=recipient_label,
+        badge_name=resolved.name,
+        message=message,
+        image_url=image_url,
+    )
+    payload = preview.model_dump()
 
     summary = (
         "Bravo draft ready (NOT sent). A confirmation card should appear for the "

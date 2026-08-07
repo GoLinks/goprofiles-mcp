@@ -16,6 +16,7 @@ from starlette.types import ASGIApp
 
 from goprofiles_mcp.tools.bravos import (
     BRAVO_PREVIEW_URI,
+    PREPARE_BRAVO_OUTPUT_SCHEMA,
     bravo_preview_html,
     prepare_bravo,
     search_bravo_types,
@@ -82,6 +83,7 @@ def _oauth2_tool(
     invoked: str,
     app: AppConfig | None = None,
     extra_meta: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> _ScopedFunctionTool:
     """Register-ready tool with oauth2 securitySchemes and ChatGPT status strings.
 
@@ -106,6 +108,7 @@ def _oauth2_tool(
         title=title,
         annotations=annotations,
         meta=meta,
+        output_schema=output_schema,
     )
     data = base.model_dump()
     data["fn"] = base.fn
@@ -193,6 +196,7 @@ mcp.add_tool(
         title="Prepare bravo",
         invoking="Preparing Bravo draft…",
         invoked="Bravo draft ready",
+        output_schema=PREPARE_BRAVO_OUTPUT_SCHEMA,
         app=AppConfig(
             resource_uri=BRAVO_PREVIEW_URI,
             visibility=["model", "app"],
