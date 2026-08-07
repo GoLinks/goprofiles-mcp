@@ -138,17 +138,19 @@ async def _fetch_bravo_types(authorization: str, *, tool: str) -> list[BravoType
 
 async def search_bravo_types(
     search: Annotated[
-        str,
+        str | None,
         Field(
             description=(
-                "Free-text phrase matched against badge type name and description "
-                "(case-insensitive substring). Examples: 'going above and beyond', "
-                "'team player', 'collaborat'. Use words that describe the recognition "
-                "you want to give."
+                "OMIT THIS to list every badge type in the workspace. That is what "
+                "you want whenever the user has not said which badge they mean — "
+                "never guess a search term to narrow the list for them, because "
+                "the results are what you show them to choose from.\n"
+                "Only pass a phrase when the user has described the kind of "
+                "recognition they want ('going above and beyond', 'collaborat'). "
+                "Matched as a case-insensitive substring of name and description."
             ),
-            min_length=1,
         ),
-    ],
+    ] = None,
     limit: Annotated[
         int,
         Field(
@@ -159,20 +161,25 @@ async def search_bravo_types(
     ] = 20,
     ctx: Context | None = None,
 ) -> str:
-    """Search the catalog of giveable Bravo badge types in the user's GoProfiles
-    workspace (https://www.goprofiles.io).
+    """List the Bravo badge types that can be given in the user's GoProfiles
+    workspace (https://www.goprofiles.io). Call with no arguments to list them all.
 
-    Always call this tool in the current chat before acting on a badge type —
-    even if you already "know" a badge name like Team Player from another chat,
-    memory, or examples. Badge ids (bid) are workspace-specific and must come
-    from this tool's output.
+    Always call this tool in the current chat before naming any badge to the
+    user — even if you already "know" a badge name like Team Player from earlier
+    in this conversation, another chat, memory, or examples. Never tell the user
+    which badges are available based on anything but this tool's output.
+
+    When the user has not said which badge they want, call this with no search so
+    they see the real choices. Do not invent a search term on their behalf: it
+    silently hides badges, and presenting a filtered result as "the available
+    badge" is wrong.
 
     Returns each badge type's name, description, and a numeric 'bid' for
-    create_bravo.
+    preview_bravo.
 
     After results return, ask the user for everything still missing in one
-    message — which badge (unless they already named one of the matches) and what
-    the recognition message should say. Do not ask for these one turn at a time.
+    message — which badge (unless they already named one) and what the message
+    should say. Do not ask for these one turn at a time.
 
     The 'bid' is internal. Never show, read aloud, or otherwise expose it to the
     user; refer to badge types by name.
@@ -184,10 +191,11 @@ async def search_bravo_types(
     authorization = get_authorization_header(ctx)
 
     badges = await _fetch_bravo_types(authorization, tool="search_bravo_types")
+    query = (search or "").strip()
 
     scored: list[tuple[int, BravoTypeResult]] = []
     for badge in badges:
-        score = _match_score(badge, search)
+        score = _match_score(badge, query)
         if score is None:
             continue
         scored.append((score, badge))
@@ -196,29 +204,52 @@ async def search_bravo_types(
     matches = [badge for _, badge in scored[:limit]]
 
     if not matches:
+        if not query:
+            return (
+                "This workspace has no giveable bravo badge types. Tell the user "
+                "there are no badges available to give, and do not attempt to "
+                "preview or send a Bravo."
+            )
         return (
             "No bravo badge types matched that search. Matching is substring-based "
-            "against name and description — retry with a shorter phrase "
-            "(e.g. 'above and beyond' or 'collaborat'), or try a different theme "
-            "from the recognition message. Tell the user nothing matched and ask "
-            "how they'd like to refine the search."
+            "against name and description — call this tool again with NO search to "
+            "list every badge and let the user pick. Do not guess another search "
+            "term on their behalf."
         )
 
     total = len(scored)
     names = [b.name or "Unknown" for b in matches]
     name_list = ", ".join(f"'{n}'" for n in names)
-    header = f"Bravo badge types ({len(matches)} of {total} matched):\n"
+    shown = len(matches)
+    if query:
+        header = f"Bravo badge types ({shown} of {total} matched '{query}'):\n"
+    else:
+        header = f"Bravo badge types (all {total} available in this workspace):\n"
     entries = [f"[{i}]\n{_format_bravo_type(b)}" for i, b in enumerate(matches, 1)]
+
     # Ask for everything still missing in ONE turn. Asking for the badge and the
     # message in separate turns made a three-field action take four exchanges.
+    if query:
+        listing = (
+            f"- These are only the badges matching '{query}', NOT the full list: "
+            f"{name_list}. Say so if you present them, or call this tool again "
+            "with no search to show everything."
+        )
+    elif shown < total:
+        listing = (
+            f"- Showing {shown} of {total} badges: {name_list}. Raise 'limit' to "
+            "show the rest."
+        )
+    else:
+        listing = f"- The badges available to give are: {name_list}."
     footer = (
         "\n\nNext step — ask for everything you still need in a SINGLE message:\n"
-        f"- Matching bravo type name(s): {name_list}.\n"
-        "- If the user already named one of these badges, treat that as their "
+        + listing
+        + "\n- If the user already named one of these badges, treat that as their "
         "choice and do NOT ask them to confirm it again.\n"
         "- Otherwise ask which one they want.\n"
-        "- In the same message, unless they already gave you the recognition "
-        "message, ask what it should say (and offer to draft one).\n"
+        "- In the same message, unless they already gave you the message text, ask "
+        "what the Bravo should say (and offer to draft it).\n"
         "Once you have the recipient, the badge, and the message, call "
         "preview_bravo once.\n"
         "Do not invent or reuse values that did not appear above. Do not show "
@@ -255,9 +286,10 @@ async def preview_bravo(
         str,
         Field(
             description=(
-                "The recognition message to send (max 850 characters). Agree this "
-                "with the user before calling — either they supply it or you draft "
-                "it for their review."
+                "The message to send with the Bravo (max 850 characters). Agree "
+                "this with the user before calling — either they supply it or you "
+                "draft it for their review. When asking them for it, call it "
+                "simply 'the message'."
             ),
             min_length=1,
             max_length=850,
@@ -361,9 +393,9 @@ async def create_bravo(
         str,
         Field(
             description=(
-                "The recognition message exactly as it appeared in the "
-                "preview_bravo result ('Message:'). Copy it verbatim — checked "
-                "against the preview. Do not shorten, summarize, or reword it."
+                "The message exactly as it appeared in the preview_bravo result "
+                "('Message:'). Copy it verbatim — checked against the preview. Do "
+                "not shorten, summarize, or reword it."
             ),
             min_length=1,
             max_length=850,
