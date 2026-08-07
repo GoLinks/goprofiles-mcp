@@ -103,13 +103,16 @@ def _oauth2_tool(
         if app.resource_uri:
             meta.setdefault("openai/outputTemplate", app.resource_uri)
 
-    base = FunctionTool.from_function(
-        fn,
-        title=title,
-        annotations=annotations,
-        meta=meta,
-        output_schema=output_schema,
-    )
+    # Omit output_schema when unset — passing None disables FastMCP's auto-inferred
+    # schema for str-returning tools (ChatGPT then sees no outputSchema).
+    from_fn_kwargs: dict[str, Any] = {
+        "title": title,
+        "annotations": annotations,
+        "meta": meta,
+    }
+    if output_schema is not None:
+        from_fn_kwargs["output_schema"] = output_schema
+    base = FunctionTool.from_function(fn, **from_fn_kwargs)
     data = base.model_dump()
     data["fn"] = base.fn
     data["security_schemes"] = [{"type": "oauth2", "scopes": list(scopes)}]
