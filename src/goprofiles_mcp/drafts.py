@@ -17,7 +17,6 @@ class BravoDraft:
     bid: int
     badge_name: str
     message: str
-    image_url: str
     recipient_label: str
     expires_at: float
 
@@ -32,7 +31,6 @@ def put_bravo_draft(
     bid: int,
     badge_name: str,
     message: str,
-    image_url: str = "",
     recipient_label: str = "",
     ttl_seconds: int = DEFAULT_DRAFT_TTL_SECONDS,
 ) -> str:
@@ -43,7 +41,6 @@ def put_bravo_draft(
         bid=bid,
         badge_name=badge_name,
         message=message,
-        image_url=image_url,
         recipient_label=recipient_label,
         expires_at=time.time() + ttl_seconds,
     )
@@ -51,6 +48,18 @@ def put_bravo_draft(
         _purge_expired_unlocked()
         _drafts[draft_id] = draft
     return draft_id
+
+
+def peek_bravo_draft(draft_id: str) -> BravoDraft | None:
+    """Read a draft without consuming it.
+
+    send_bravo needs the stored values to validate the caller's confirm_* echoes
+    and to build the confirmation prompt, both of which happen before it decides
+    to send. Popping first would destroy the draft when the user declines.
+    """
+    with _lock:
+        _purge_expired_unlocked()
+        return _drafts.get(draft_id.strip())
 
 
 def take_bravo_draft(draft_id: str) -> BravoDraft | None:

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import os
 from typing import Annotated
 
 import httpx
 from fastmcp import Context
+from fastmcp.server.elicitation import AcceptedElicitation
 from fastmcp.tools import ToolResult
+from mcp.types import ClientCapabilities, ElicitationCapability
 from pydantic import BaseModel, Field
 
 from goprofiles_mcp.client import (
@@ -19,7 +20,12 @@ from goprofiles_mcp.client import (
     http_client,
     raise_for_status,
 )
-from goprofiles_mcp.drafts import put_bravo_draft, take_bravo_draft
+from goprofiles_mcp.drafts import (
+    BravoDraft,
+    peek_bravo_draft,
+    put_bravo_draft,
+    take_bravo_draft,
+)
 
 # Tokens are only printed by search_bravo_types; prepare_bravo rejects invented ones.
 _BADGE_TOKEN_SECRET = os.environ.get(
@@ -37,7 +43,6 @@ class BravoTypeResult(BaseModel):
     bid: int = 0
     name: str = ""
     description: str = ""
-    image: str = ""
 
 
 class BravoTypesResponse(BaseModel):
@@ -61,10 +66,6 @@ class BravoDraftPreview(BaseModel):
     recipient_label: str = Field(description="Display name of the recipient.")
     badge_name: str = Field(description="Verified Bravo badge type name.")
     message: str = Field(description="Recognition message that will be sent.")
-    image_url: str = Field(
-        default="",
-        description="CloudFront badge image URL for the preview card, if any.",
-    )
 
 
 PREPARE_BRAVO_OUTPUT_SCHEMA = BravoDraftPreview.model_json_schema()
@@ -106,24 +107,13 @@ def _badge_token(bid: int, name: str) -> str:
     return digest[:24]
 
 
-def _cloudfront_image_url(url: str | None) -> str:
-    """Rewrite S3 bucket URLs to CloudFront-style hosts (never s3.amazonaws.com)."""
-    if not url or not isinstance(url, str):
-        return ""
-    raw = url.strip()
-    if not raw:
-        return ""
-    # Relative app paths are not usable in the ChatGPT sandbox iframe.
-    if raw.startswith(("./", "/")):
-        return ""
-    prefix = "https://s3.amazonaws.com/"
-    if raw.startswith(prefix):
-        # https://s3.amazonaws.com/images-dev.goprofiles.io/x -> https://images-dev.goprofiles.io/x
-        return "https://" + raw[len(prefix) :]
-    http_s3 = "http://s3.amazonaws.com/"
-    if raw.startswith(http_s3):
-        return "https://" + raw[len(http_s3) :]
-    return raw
+def _normalized(value: str) -> str:
+    """Collapse whitespace for confirm_* echo comparison.
+
+    Tolerates a client re-wrapping the message while still catching real content
+    drift between what was previewed and what the caller claims to be sending.
+    """
+    return " ".join(value.split())
 
 
 def _format_bravo_type(b: BravoTypeResult) -> str:
@@ -198,6 +188,35 @@ def _validate_badge_token(bid: int, name: str, badge_token: str) -> str | None:
     )
 
 
+async def _confirm_send(ctx: Context, draft: BravoDraft) -> bool:
+    """Ask the user to confirm the send, if the client can be asked at all.
+
+    Elicitation is the only gate that fires even when the host has the tool
+    allowlisted. Clients that don't declare the capability (ChatGPT, which
+    confirms via the preview widget's Send button instead) skip it and fall back
+    to the host's own approval prompt, which renders the confirm_* arguments.
+    """
+    supports_elicitation = ctx.session.check_client_capability(
+        ClientCapabilities(elicitation=ElicitationCapability())
+    )
+    if not supports_elicitation:
+        return True
+
+    result = await ctx.elicit(
+        (
+            "Send this Bravo?\n\n"
+            f"To: {draft.recipient_label}\n"
+            f"Badge: {draft.badge_name}\n\n"
+            f"{draft.message}"
+        ),
+        # An explicit response_type is required — response_type=None is deprecated
+        # in FastMCP 3.x and renders an empty, unusable form in some clients.
+        response_type=["Send it", "Cancel"],
+        response_title="Confirm",
+    )
+    return isinstance(result, AcceptedElicitation) and result.data == "Send it"
+
+
 def bravo_preview_html() -> str:
     """HTML for the ChatGPT / MCP Apps Bravo confirmation widget."""
     return """\
@@ -254,15 +273,6 @@ def bravo_preview_html() -> str:
       margin-bottom: 16px; padding: 12px; border-radius: 12px;
       background: color-mix(in srgb, var(--accent) 10%, transparent);
     }
-    .badge img {
-      width: 72px; height: 72px; object-fit: contain; border-radius: 12px;
-      background: var(--card); border: 1px solid var(--border);
-    }
-    .badge-placeholder {
-      width: 72px; height: 72px; border-radius: 12px;
-      background: var(--border); display: grid; place-items: center;
-      font-size: 11px; color: var(--muted); text-align: center; padding: 6px;
-    }
     .badge-name { font-weight: 650; font-size: 16px; }
     .message {
       white-space: pre-wrap; line-height: 1.45; font-size: 15px;
@@ -287,10 +297,7 @@ def bravo_preview_html() -> str:
     <h1 id="title">Confirm before sending</h1>
     <p class="to" id="to"></p>
     <div class="badge">
-      <div id="image-slot"></div>
-      <div>
-        <div class="badge-name" id="badge-name"></div>
-      </div>
+      <div class="badge-name" id="badge-name"></div>
     </div>
     <p class="message" id="message"></p>
     <div class="actions">
@@ -304,6 +311,7 @@ def bravo_preview_html() -> str:
 
     const app = new App({ name: "Bravo Preview", version: "1.0.0" });
     let draftId = "";
+    let draft = null;
 
     function setStatus(text, kind) {
       const el = document.getElementById("status");
@@ -315,15 +323,6 @@ def bravo_preview_html() -> str:
       if (result?.structuredContent && typeof result.structuredContent === "object") {
         return result.structuredContent;
       }
-      const text = result?.content?.find?.((c) => c.type === "text")?.text
-        || (typeof result?.content === "string" ? result.content : "");
-      if (!text) return null;
-      const marker = "DRAFT_JSON:";
-      const idx = text.indexOf(marker);
-      if (idx >= 0) {
-        try { return JSON.parse(text.slice(idx + marker.length).trim()); }
-        catch { return null; }
-      }
       return null;
     }
 
@@ -332,24 +331,12 @@ def bravo_preview_html() -> str:
         setStatus("Waiting for draft data…");
         return;
       }
+      draft = data;
       draftId = data.draft_id || "";
       document.getElementById("badge-name").textContent = data.badge_name || "Bravo";
       document.getElementById("message").textContent = data.message || "";
       const label = data.recipient_label || "coworker";
       document.getElementById("to").textContent = "To: " + label;
-      const slot = document.getElementById("image-slot");
-      slot.replaceChildren();
-      if (data.image_url) {
-        const img = document.createElement("img");
-        img.src = data.image_url;
-        img.alt = data.badge_name || "Bravo badge";
-        slot.appendChild(img);
-      } else {
-        const ph = document.createElement("div");
-        ph.className = "badge-placeholder";
-        ph.textContent = "No image";
-        slot.appendChild(ph);
-      }
       setStatus("Review this Bravo, then send or cancel.");
     }
 
@@ -371,9 +358,16 @@ def bravo_preview_html() -> str:
       sendBtn.disabled = true;
       setStatus("Sending Bravo…");
       try {
+        // send_bravo re-validates these against the stored draft, so echo them
+        // straight from structuredContent rather than reading the rendered DOM.
         const result = await app.callServerTool({
           name: "send_bravo",
-          arguments: { draft_id: draftId },
+          arguments: {
+            draft_id: draftId,
+            confirm_recipient: draft?.recipient_label || "",
+            confirm_badge: draft?.badge_name || "",
+            confirm_message: draft?.message || "",
+          },
         });
         const text = result?.content?.find?.((c) => c.type === "text")?.text
           || (typeof result?.content === "string" ? result.content : "Sent.");
@@ -487,8 +481,8 @@ async def search_bravo_types(
         "with that row's bid, badge_name, badge_token, and the recognition "
         "message.\n"
         "Do not invent or reuse values that did not appear above. Do not show "
-        "bid or badge_token to the user. Never call send_bravo yourself — the "
-        "user sends from the preview widget after prepare_bravo."
+        "bid or badge_token to the user. Never call send_bravo until the user "
+        "has seen the prepare_bravo preview and explicitly confirmed it."
     )
     return header + "\n\n".join(entries) + footer
 
@@ -562,16 +556,18 @@ async def prepare_bravo(
 ) -> ToolResult:
     """Prepare a Bravo draft for user confirmation (does NOT send).
 
-    Validates the badge against the live catalog, stores a short-lived draft,
-    and returns structured preview data for the confirmation widget. The user
-    must click Send in the widget (send_bravo) — never call send_bravo yourself.
+    Validates the badge against the live catalog, stores a short-lived draft
+    (single-use, ~5 minutes), and returns a preview of exactly what will be sent.
+    Sending is a separate, explicitly confirmed step — see send_bravo.
 
     Required workflow:
     1. search_people for receiver_uid (+ recipient_name for display).
     2. search_bravo_types; ask the user which badge name to use.
     3. If no message yet, ask draft-vs-provide.
     4. Call prepare_bravo with the chosen bid/badge_name/badge_token and message.
-    5. Show the preview widget; wait for the user to Send or Cancel.
+    5. Show the user the recipient, badge, and message, and wait for them to
+       confirm. Only then call send_bravo. Some clients render a preview card
+       with its own Send button, which confirms and sends on its own.
 
     Read-only. Requires search:read scope.
     """
@@ -601,7 +597,6 @@ async def prepare_bravo(
         )
 
     message = message.strip()
-    image_url = _cloudfront_image_url(resolved.image)
     recipient_label = (recipient_name or "").strip() or "coworker"
 
     draft_id = put_bravo_draft(
@@ -609,7 +604,6 @@ async def prepare_bravo(
         bid=resolved.bid,
         badge_name=resolved.name,
         message=message,
-        image_url=image_url,
         recipient_label=recipient_label,
     )
 
@@ -618,18 +612,25 @@ async def prepare_bravo(
         recipient_label=recipient_label,
         badge_name=resolved.name,
         message=message,
-        image_url=image_url,
     )
     payload = preview.model_dump()
 
+    # Plain-text preview, not a JSON blob: clients without the widget render this
+    # straight into the chat, and it is what the user reads before confirming.
     summary = (
-        "Bravo draft ready (NOT sent). A confirmation card should appear for the "
-        f"user showing badge '{resolved.name}' to {recipient_label}. Ask them to "
-        "review the message and click Send in the widget, or Cancel and tell you "
-        "what to change. Never call send_bravo yourself — only the widget Send "
-        "button should send. Do not show draft_id, uid, bid, or badge_token to "
-        "the user.\n"
-        f"DRAFT_JSON:{json.dumps(payload, separators=(',', ':'))}"
+        "Bravo draft ready — NOT sent.\n\n"
+        f"To:      {recipient_label}\n"
+        f"Badge:   {resolved.name}\n"
+        "Message:\n"
+        f"{message}\n\n"
+        f"draft_id: {draft_id}  (tool use only — do not show to the user)\n\n"
+        "NEXT STEP — show the user the To / Badge / Message above and ask them to "
+        "confirm. Do not call send_bravo until they explicitly say to send. Some "
+        "clients render a preview card with a Send button; if the user uses that, "
+        "you do not need to call send_bravo at all. Otherwise, once they confirm, "
+        "call send_bravo with draft_id plus confirm_recipient, confirm_badge, and "
+        "confirm_message copied exactly from this preview. Do not show draft_id, "
+        "uid, bid, or badge_token to the user."
     )
     return ToolResult(content=summary, structured_content=payload)
 
@@ -639,31 +640,107 @@ async def send_bravo(
         str,
         Field(
             description=(
-                "Opaque draft_id from prepare_bravo. This is the only input — "
-                "do not pass message, bid, or recipient. Prefer calling this from "
-                "the preview widget Send button, not from the model."
+                "Opaque draft_id from prepare_bravo in THIS conversation. Never "
+                "show it to the user."
+            ),
+            min_length=1,
+        ),
+    ],
+    confirm_recipient: Annotated[
+        str,
+        Field(
+            description=(
+                "The recipient name exactly as it appeared in the prepare_bravo "
+                "preview ('To:'). Copy it verbatim — this is checked against the "
+                "stored draft and is shown to the user when they approve the send."
+            ),
+            min_length=1,
+        ),
+    ],
+    confirm_badge: Annotated[
+        str,
+        Field(
+            description=(
+                "The badge name exactly as it appeared in the prepare_bravo "
+                "preview ('Badge:'). Copy it verbatim — checked against the draft."
+            ),
+            min_length=1,
+        ),
+    ],
+    confirm_message: Annotated[
+        str,
+        Field(
+            description=(
+                "The full recognition message exactly as it appeared in the "
+                "prepare_bravo preview ('Message:'). Copy it verbatim — checked "
+                "against the draft, and shown to the user before sending. Do not "
+                "shorten, summarize, or reword it."
             ),
             min_length=1,
         ),
     ],
     ctx: Context | None = None,
 ) -> str:
-    """Send a previously prepared Bravo draft by draft_id only.
+    """Send a Bravo that the user has already reviewed and explicitly confirmed.
+
+    ONLY call this after the user has seen the prepare_bravo preview and said to
+    send it. Asking for a Bravo is not confirmation — they must approve the actual
+    recipient, badge, and message. If they have not, ask first.
 
     Loads the exact payload stored by prepare_bravo (single-use, expires in
-    ~5 minutes) and POSTs it to bravos.php. Rejects missing/expired drafts.
+    ~5 minutes) and POSTs it to bravos.php. The confirm_* arguments must match
+    that stored draft; they exist so the user can see what they are approving.
+    They are validated, not sent — the outgoing Bravo always comes from the draft.
 
-    Not read-only. Requires profiles:write scope. Intended for the confirmation
-    widget (UI-only visibility); the model should not call this tool.
+    Not read-only and not reversible: this notifies the recipient. Requires
+    profiles:write scope.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
 
+    draft = peek_bravo_draft(draft_id)
+    if draft is None:
+        return (
+            "Bravo not sent — draft missing or expired. Call prepare_bravo again "
+            "to create a fresh draft, then have the user confirm it before "
+            "calling send_bravo."
+        )
+
+    # Reject drift between what the user was shown and what the caller claims to
+    # be sending. The draft is left intact so a corrected retry can reuse it.
+    echoes = (
+        ("confirm_recipient", confirm_recipient, draft.recipient_label, False),
+        ("confirm_badge", confirm_badge, draft.badge_name, False),
+        ("confirm_message", confirm_message, draft.message, True),
+    )
+    for field, provided, expected, case_sensitive in echoes:
+        got, want = _normalized(provided), _normalized(expected)
+        if not case_sensitive:
+            got, want = got.lower(), want.lower()
+        if got != want:
+            return (
+                f"Bravo not sent — {field} does not match the prepared draft. "
+                "Copy the To / Badge / Message values verbatim from the "
+                "prepare_bravo preview, or call prepare_bravo again if the user "
+                "wants different content. The draft is still valid."
+            )
+
+    if not await _confirm_send(ctx, draft):
+        take_bravo_draft(draft_id)
+        return (
+            "Bravo not sent — the user declined the confirmation. The draft has "
+            "been discarded. Ask what they'd like to change, then call "
+            "prepare_bravo again if they still want to send one."
+        )
+
+    # Consume only once the send is actually going out, so a declined or rejected
+    # attempt never burns the draft.
     draft = take_bravo_draft(draft_id)
     if draft is None:
         return (
             "Bravo not sent — draft missing or expired. Call prepare_bravo again "
-            "to create a fresh draft, then have the user confirm in the preview."
+            "to create a fresh draft, then have the user confirm it before "
+            "calling send_bravo."
         )
 
     authorization = get_authorization_header(ctx)

@@ -121,19 +121,14 @@ def _oauth2_tool(
 
 mcp = fastmcp.FastMCP("GoProfiles")
 
-# Confirmation widget for prepare_bravo (CSP allowlists CDN images + ext-apps JS).
+# Confirmation widget for prepare_bravo. The card is text-only, so the CSP only
+# needs the ext-apps JS origin.
 # `domain` is required by ChatGPT for a unique widget sandbox / app submission.
 @mcp.resource(
     BRAVO_PREVIEW_URI,
     app=AppConfig(
         domain=_WIDGET_DOMAIN,
-        csp=ResourceCSP(
-            resource_domains=[
-                "https://unpkg.com",
-                "https://images.goprofiles.io",
-                "https://images-dev.goprofiles.io",
-            ],
-        ),
+        csp=ResourceCSP(resource_domains=["https://unpkg.com"]),
         prefers_border=True,
     ),
 )
@@ -221,12 +216,17 @@ mcp.add_tool(
         title="Send bravo",
         invoking="Sending Bravo…",
         invoked="Bravo finished",
-        # UI-only: model cannot send; widget Send button calls this tool.
-        app=AppConfig(visibility=["app"]),
+        # Model-visible so clients without the preview widget (Claude, GoSearch)
+        # can complete the flow; the widget Send button also calls it.
+        app=AppConfig(visibility=["model", "app"]),
         annotations=ToolAnnotations(
             title="Send bravo",
             readOnlyHint=False,
-            destructiveHint=False,
+            # A Bravo destroys nothing, but it is irreversible and notifies a
+            # coworker. Hosts key extra approval friction off this hint, and a
+            # guaranteed confirmation prompt matters more here than a literal
+            # reading of "destructive".
+            destructiveHint=True,
             idempotentHint=False,
             openWorldHint=True,
         ),
