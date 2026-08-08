@@ -17,6 +17,7 @@
 ---
 
 ## MCP Testing Checklist
+[SETUP LOOM](https://www.loom.com/share/c8f45c270f974644b57e493a505c074a)
 
 ### 1. Local server startup
 - [ ] Run (`uv sync`)

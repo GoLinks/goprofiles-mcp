@@ -28,7 +28,8 @@ MCP clients should send a per-user GoProfiles OAuth/API bearer token with each r
 Authorization: Bearer YOUR_TOKEN
 ```
 
-The MCP server forwards that header to `api.goprofiles.io`. GoProfiles remains responsible for token validation, scope enforcement, refresh, storage, and revocation.
+The MCP server forwards that header to the configured GoProfiles API
+(`GOPROFILES_API_URL`, default `https://api.goprofiles.io`). GoProfiles remains responsible for token validation, scope enforcement, refresh, storage, and revocation.
 
 An OAuth client must be pre-registered in your GoProfiles workspace with:
 
@@ -47,11 +48,25 @@ This project uses Python `3.12` and [`uv`](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-4. Run the MCP server locally:
+4. Point the server at your GoProfiles sandbox API (not production). Copy the
+   example env file and replace `<your-username>` with your dev path:
+
+```bash
+cp .env.example .env
+```
+
+See [`.env.example`](.env.example) for every supported variable. `.env` is
+gitignored and must not be committed. Without a local `.env`, the server
+defaults to `https://api.goprofiles.io`.
+
+5. Run the MCP server locally:
 
 ```bash
 uv run python -m goprofiles_mcp
 ```
+
+Confirm startup prints your sandbox base, e.g.
+`GoProfiles API base: https://dev.goprofiles.io/d/<you>/d/api`.
 
 The server binds to `0.0.0.0:8000` by default. Override with `MCP_HOST` and `MCP_PORT` if you need a different host or port:
 
@@ -59,7 +74,7 @@ The server binds to `0.0.0.0:8000` by default. Override with `MCP_HOST` and `MCP
 MCP_HOST=127.0.0.1 MCP_PORT=9000 uv run python -m goprofiles_mcp
 ```
 
-5. Verify health and OAuth discovery:
+6. Verify health and OAuth discovery:
 
 ```bash
 curl http://localhost:8000/health

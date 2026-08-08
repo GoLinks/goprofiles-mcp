@@ -5,9 +5,12 @@ and register the tool function in `goprofiles_mcp.server`:
 
     from goprofiles_mcp.tools.<name> import search_examples
 
+    # Use _oauth2_tool so ChatGPT shows only this tool's scopes, not the full
+    # server scopes_supported list. Pass the OAuth scope(s) the PHP endpoint needs.
     mcp.add_tool(
-        FunctionTool.from_function(
+        _oauth2_tool(
             search_examples,
+            scopes=["search:read"],
             title="Search examples",
             annotations=ToolAnnotations(
                 title="Search examples",

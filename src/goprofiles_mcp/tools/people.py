@@ -189,7 +189,7 @@ def _format_person(p: PersonResult, *, show: set[str], show_match: bool) -> str:
         f"Title:      {p.title or 'Unknown'}",
         f"Department: {p.department_name or 'Unknown'}",
         f"Location:   {p.location or 'Unknown'}",
-        # uid is for get_profile only — never repeat it in user-facing replies.
+        # uid is for follow-up tool calls — never repeat it in user-facing replies.
         f"uid:        {p.uid}  (tool use only — do not show to the user)",
     ]
 
@@ -520,9 +520,9 @@ async def search_people(
     several people match, and ask the user which one they meant rather than
     guessing between two plausible matches.
 
-    The 'uid' is an internal id for calling get_profile (and similar tools). Never
-    show, read aloud, or otherwise expose 'uid' values to the user; refer to people
-    by name, username, title, or department instead.
+    The 'uid' is an internal id for calling get_profile and similar tools. Never
+    show, read aloud, or otherwise expose 'uid' values to the user; refer to
+    people by name, username, title, or department instead.
 
     Name matching is substring-based, not fuzzy, so pass several spelling and
     shortening variants in 'names' at once. Results are ranked best-first and each
@@ -605,23 +605,26 @@ async def search_people(
     if names and len(data.results) > 1:
         footer = (
             "\n\nMultiple people matched. Use title/department/location to pick the "
-            "right uid for get_profile, and confirm with the user if the match is "
-            "ambiguous. Do not show uid values to the user."
+            "right uid for get_profile, and confirm with the user "
+            "if the match is ambiguous. Do not show uid values to the user."
         )
     return header + "\n\n".join(entries) + footer
 
 
 async def get_profile(
     uid: Annotated[
-        int,
+        int | None,
         Field(
             description=(
-                "Numeric user id from search_people. Pass the uid only — never show "
-                "it to the user."
+                "Numeric user id of the person, from a search_people call in THIS "
+                "chat. There is no default and no 'current user' — without a uid "
+                "this tool returns nothing, so run search_people first instead of "
+                "calling with no arguments. Pass the uid only — never show it to "
+                "the user."
             ),
             ge=1,
         ),
-    ],
+    ] = None,
     ctx: Context | None = None,
 ) -> str:
     """Get a specific person's full GoProfiles profile by uid
@@ -634,11 +637,27 @@ async def get_profile(
     included in the response text.
 
     Use after search_people when you need the full profile for a resolved uid.
+    This tool cannot look anyone up by name and has no notion of "me" or the
+    signed-in user: search_people is the only way to turn a name into a uid, and
+    the uid must come from this chat, never from memory or another conversation.
+
     Never show the uid to the user. Read-only. Requires profiles:read scope.
     """
     if ctx is None:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
+
+    # The model reaches for this tool with no uid when it has a name (or "my
+    # profile") and no lookup yet. A missing-argument schema error tells it
+    # nothing it can act on, so accept the call and hand back the next step.
+    if uid is None:
+        return (
+            "No profile fetched — get_profile requires a uid and has no default. "
+            "Call search_people with the person's name to get their uid, then call "
+            "get_profile again with it. If the user asked about their own profile, "
+            "ask them for their name first: this server cannot identify the "
+            "signed-in user."
+        )
 
     not_found = (
         "No profile found for that person. Confirm the match from search_people "
