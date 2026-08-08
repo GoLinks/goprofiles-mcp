@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import Context
@@ -90,6 +92,78 @@ def _points(value: int | None) -> int:
 
 def _points_line(points: int) -> str:
     return str(points) if points else "none"
+
+
+# The API's own default timezone (config.inc sets date_default_timezone_set to
+# this), used only when the caller gives a datetime with no offset. There is no
+# OAuth-reachable endpoint that reveals the sender's own timezone, so a naive
+# time cannot be resolved per-user.
+_DEFAULT_TZ = ZoneInfo("America/Los_Angeles")
+
+# No upper bound exists server-side, so cap it here. Catches a mistyped year and
+# a millisecond epoch, both of which the API would otherwise accept silently.
+_MAX_SCHEDULE_AHEAD = timedelta(days=365)
+
+
+def _resolve_send_at(value: str | None) -> tuple[int, str | None]:
+    """Turn an ISO 8601 string into an epoch. Returns (epoch, error_message).
+
+    An epoch of 0 means "send immediately". Comparing resolved instants rather
+    than raw strings lets two spellings of the same moment agree while a genuine
+    change of time still fails the confirmation diff.
+    """
+    if value is None or not value.strip():
+        return 0, None
+
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return 0, (
+            f"'{value}' is not a valid date and time. Use ISO 8601, ideally with "
+            "the user's UTC offset — for example 2026-08-12T09:00:00-07:00. Ask "
+            "the user for the date and time they mean rather than guessing."
+        )
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_DEFAULT_TZ)
+
+    now = datetime.now(UTC)
+    if parsed <= now:
+        return 0, (
+            f"{_send_at_line(int(parsed.timestamp()))} is in the past. Bravos can "
+            "only be scheduled for the future — ask the user for a later time, or "
+            "omit the time to send it now."
+        )
+    if parsed - now > _MAX_SCHEDULE_AHEAD:
+        return 0, (
+            "That is more than a year away. Check the date with the user — a "
+            "mistyped year is the usual cause — or omit the time to send now."
+        )
+
+    return int(parsed.timestamp()), None
+
+
+def _relative(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"about {max(minutes, 1)} minute{'s' if minutes != 1 else ''} from now"
+    hours = minutes // 60
+    if hours < 48:
+        return f"about {hours} hour{'s' if hours != 1 else ''} from now"
+    return f"about {hours // 24} day{'s' if hours // 24 != 1 else ''} from now"
+
+
+def _send_at_line(epoch: int) -> str:
+    """Absolute time plus a relative form.
+
+    The relative part is the load-bearing half: it carries no timezone, so a
+    wrong offset is obvious to the user reading the preview.
+    """
+    if not epoch:
+        return "immediately"
+    when = datetime.fromtimestamp(epoch, tz=_DEFAULT_TZ)
+    stamp = when.strftime("%a %d %b %Y, %H:%M %Z (UTC%z)")
+    return f"{stamp} — {_relative(epoch - datetime.now(UTC).timestamp())}"
 
 
 async def _recipient_name(uid: int, authorization: str) -> str | None:
@@ -322,6 +396,19 @@ async def preview_bravo(
             ge=0,
         ),
     ] = None,
+    send_at: Annotated[
+        str | None,
+        Field(
+            description=(
+                "When to send it, ONLY when the user asked for a specific time "
+                "('send it Monday morning'). ISO 8601 — include the user's UTC "
+                "offset whenever you know it, e.g. '2026-08-12T09:00:00-07:00'; "
+                "without an offset the time is read as US Pacific. Never invent a "
+                "time. Omit this to send immediately, which is the normal case. A "
+                "scheduled Bravo cannot be cancelled or rescheduled afterwards."
+            ),
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> str:
     """Preview a Bravo before sending it. Sends nothing.
@@ -369,6 +456,10 @@ async def preview_bravo(
         )
 
     awarded = _points(points)
+    when, when_error = _resolve_send_at(send_at)
+    if when_error is not None:
+        return f"No preview — {when_error}"
+
     stage(
         ctx,
         tool=_TOOL,
@@ -379,30 +470,50 @@ async def preview_bravo(
             "bid": bid,
             "comment": comment,
             "points": awarded,
+            "send_at": when,
         },
         confirm_args={
             "recipient_name": recipient,
             "badge_name": badge.name,
             "comment": comment,
-            # In confirm_args so the amount appears in the host's approval prompt
-            # and is drift-checked — it is the only spendable field here.
+            # Both of these are in confirm_args so they appear in the host's
+            # approval prompt and are drift-checked: one is spendable, the other
+            # commits to a delivery that cannot later be recalled.
             "points": awarded,
+            "send_at": when,
         },
     )
+
+    caveats = ""
+    if when:
+        caveats = (
+            "\nOnce scheduled this CANNOT be cancelled or rescheduled from here — "
+            "tell the user that before they confirm."
+        )
+        if awarded:
+            caveats += (
+                f" The {awarded} point(s) leave their balance as soon as it is "
+                "scheduled; the recipient receives them when it actually sends."
+            )
+        caveats += "\n"
 
     return (
         "Bravo previewed — NOT sent.\n\n"
         f"To:      {recipient}\n"
         f"Badge:   {badge.name}\n"
         f"Points:  {_points_line(awarded)}\n"
-        "Message:\n"
-        f"{comment}\n\n"
-        "NEXT STEP — show the user the To / Badge / Points / Message above and ask "
-        "them to confirm. Do not call create_bravo until they explicitly say to "
-        "send it. When they do, call create_bravo with recipient_name, badge_name, "
-        "comment, and points copied exactly from this preview — including points "
-        "when it is not 'none', or the send will be refused. create_bravo takes no "
-        "uid, bid, or token; it sends the Bravo previewed here."
+        f"Sends:   {_send_at_line(when)}\n"
+        + ("         Delivered on the next hourly run at or after that time.\n" if when else "")
+        + "Message:\n"
+        f"{comment}\n"
+        f"{caveats}\n"
+        "NEXT STEP — show the user the To / Badge / Points / Sends / Message above "
+        "and ask them to confirm. Do not call create_bravo until they explicitly "
+        "say to send it. When they do, call create_bravo with recipient_name, "
+        "badge_name, comment, points, and send_at copied exactly from this preview "
+        "— including points and send_at when they are set, or the send will be "
+        "refused. create_bravo takes no uid, bid, or token; it sends the Bravo "
+        "previewed here."
     )
 
 
@@ -453,6 +564,17 @@ async def create_bravo(
             ge=0,
         ),
     ] = None,
+    send_at: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The send time from the preview_bravo result ('Sends:'), as the "
+                "same ISO 8601 value you passed to preview_bravo. Omit it only "
+                "when the preview said 'immediately'; omitting it when the preview "
+                "showed a time will refuse the send."
+            ),
+        ),
+    ] = None,
     ctx: Context | None = None,
 ) -> str:
     """Send a Bravo (peer recognition) that the user has already approved.
@@ -465,8 +587,9 @@ async def create_bravo(
     no uid or bid: the arguments here are the human-readable values the user
     approved, and they are checked against the preview rather than sent.
 
-    When the preview showed a point count, pass it — points are deducted from the
-    sender's balance, so omitting them is treated as a change to the approved
+    When the preview showed a point count or a send time, pass them — points are
+    deducted from the sender's balance and a send time commits to a delivery that
+    cannot be recalled, so omitting either is treated as a change to the approved
     Bravo and the send is refused.
 
     The sender is always the authenticated user, derived from the access token.
@@ -479,6 +602,10 @@ async def create_bravo(
     authorization = get_authorization_header(ctx)
 
     awarded = _points(points)
+    when, when_error = _resolve_send_at(send_at)
+    if when_error is not None:
+        return f"No Bravo sent — {when_error}"
+
     result = await claim(
         ctx,
         tool=_TOOL,
@@ -487,13 +614,16 @@ async def create_bravo(
             "badge_name": badge_name,
             "comment": comment.strip(),
             "points": awarded,
+            "send_at": when,
         },
         summary=(
-            "Send this Bravo?\n\n"
+            ("Schedule this Bravo?" if when else "Send this Bravo?") + "\n\n"
             f"To: {recipient_name}\n"
             f"Badge: {badge_name}\n"
-            f"Points: {_points_line(awarded)}\n\n"
-            f"{comment.strip()}"
+            f"Points: {_points_line(awarded)}\n"
+            f"Sends: {_send_at_line(when)}\n"
+            + ("Cannot be cancelled once scheduled.\n" if when else "")
+            + f"\n{comment.strip()}"
         ),
     )
 
@@ -505,11 +635,12 @@ async def create_bravo(
         )
     if result.status is ClaimStatus.DRIFTED:
         return (
-            "No Bravo sent — the recipient, badge, message, or points do not match "
-            "the preview. Copy recipient_name, badge_name, comment, and points "
-            "verbatim from the preview_bravo result (points must be included when "
-            "the preview showed a number), or call preview_bravo again if the user "
-            "wants different content. The preview is still valid."
+            "No Bravo sent — the recipient, badge, message, points, or send time "
+            "do not match the preview. Copy recipient_name, badge_name, comment, "
+            "points, and send_at verbatim from the preview_bravo result (points "
+            "and send_at must be included whenever the preview showed them), or "
+            "call preview_bravo again if the user wants different content. The "
+            "preview is still valid."
         )
     if result.status is ClaimStatus.EXPIRED:
         return (
@@ -545,6 +676,10 @@ async def create_bravo(
     # the API's add-on-gated points path entirely.
     if sending_points > 0:
         body["points"] = sending_points
+    # The API takes a numeric epoch and rejects date strings outright.
+    sending_when = int(sending.get("send_at") or 0)
+    if sending_when > 0:
+        body["scheduled_time"] = sending_when
 
     params = external_params(tool=_TOOL)
     try:
@@ -565,12 +700,19 @@ async def create_bravo(
         # The API rejects an over-cap amount with 400 and an unaffordable one
         # with 422, but masks the reason for most tenants — so name the likely
         # cause here rather than surfacing "An error occurred".
+        reasons = []
         if sending_points > 0:
+            reasons.append(
+                f"the {sending_points} points may exceed the company's per-Bravo "
+                "limit or the sender's remaining balance"
+            )
+        if sending_when > 0:
+            reasons.append("the scheduled time may no longer be in the future")
+        if reasons:
             return (
-                f"No Bravo sent — GoProfiles rejected it, and {sending_points} "
-                "points may be the reason: the amount can exceed the company's "
-                "per-Bravo limit, or the sender may not have enough points left. "
-                "Tell the user it was not sent, ask for a smaller number, and "
+                "No Bravo sent — GoProfiles rejected it, and "
+                + " or ".join(reasons)
+                + ". Tell the user it was not sent, ask them what to change, and "
                 "call preview_bravo again."
             )
         raise
@@ -584,8 +726,9 @@ async def create_bravo(
             "confirming the recipient and badge with the user."
         )
 
+    default = "Bravo scheduled." if data.scheduled else "Bravo sent successfully."
     lines = [
-        data.message.strip() or "Bravo sent successfully.",
+        data.message.strip() or default,
         f"Badge:      {badge_name}",
         f"To:         {recipient_name}",
     ]
@@ -594,5 +737,9 @@ async def create_bravo(
     if data.failed_count:
         lines.append(f"Failed:     {data.failed_count}")
     if data.scheduled:
-        lines.append("Note:       This Bravo was scheduled for later delivery.")
+        lines.append(f"Sends:      {_send_at_line(sending_when)}")
+        lines.append(
+            "Note:       Delivered on the next hourly run at or after that time, "
+            "and it cannot be cancelled from here."
+        )
     return "\n".join(lines)
