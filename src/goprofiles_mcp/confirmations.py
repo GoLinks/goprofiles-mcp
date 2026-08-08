@@ -37,6 +37,7 @@ Known limits, both deliberate:
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -77,8 +78,17 @@ class ClaimResult:
         return self.status is ClaimStatus.OK
 
 
+logger = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 _pending: dict[str, PendingWrite] = {}
+
+
+def _redact(key: str) -> str:
+    """A key fragment safe to log — never the credential itself."""
+    source, _, tool = key.partition("\n")
+    kind, _, value = source.partition(":")
+    return f"{kind}:{value[:8]}…/{tool}"
 
 
 def _normalize(value: Any) -> Any:
@@ -105,23 +115,30 @@ def _owner_key(ctx: Context, tool: str) -> str:
     nothing for the model to carry between the two calls — and nothing to leak
     into a host's approval dialog.
 
-    Prefers the MCP session. Falls back to the bearer token when there is no
-    session header, so the handshake still works under ``MCP_STATELESS=true``;
-    note ``ctx.session_id`` is unusable there because it silently mints a fresh
-    id per request. Including the tool lets different write tools hold
-    independent pending writes for the same caller.
+    Over HTTP this is derived from the **bearer token only**. An earlier version
+    preferred the ``mcp-session-id`` header and fell back to the bearer, which
+    broke in ChatGPT: it does not hold one MCP session across tool calls, so
+    ``preview`` and ``send`` derived different keys and the send always reported
+    nothing pending. Mixing two sources is worse than either alone — if the
+    header is present on one call and absent on the next, the key changes prefix
+    and can never match. The bearer is the caller's actual identity and is
+    stable across transport sessions and under ``MCP_STATELESS=true``.
+
+    Only stdio / in-memory transports, which carry no HTTP request, fall back to
+    ``ctx.session_id`` (stable for the life of that connection).
+
+    Including the tool lets different write tools hold independent pending
+    writes for the same caller.
     """
     request = ctx.request_context.request if ctx.request_context else None
     if request is not None:
-        session = request.headers.get("mcp-session-id")
-        if session:
-            return f"session:{session}\n{tool}"
-        auth = request.headers.get("authorization", "")
+        auth = request.headers.get("authorization", "").strip()
         if auth:
-            digest = hashlib.sha256(auth.encode()).hexdigest()
+            # Hash the credential itself, not the whole header, so a difference
+            # in scheme casing or spacing can't change the key.
+            token = auth.split(maxsplit=1)[-1]
+            digest = hashlib.sha256(token.encode()).hexdigest()
             return f"bearer:{digest}\n{tool}"
-    # stdio / in-memory transports: no HTTP request, but session_id is stable
-    # for the life of the connection.
     return f"session:{ctx.session_id}\n{tool}"
 
 
@@ -161,6 +178,14 @@ def _validate_unlocked(
 ) -> ClaimResult:
     pending = _pending.get(key)
     if pending is None:
+        # Fires only on a miss, so it's silent in normal use. If a caller's key
+        # is not stable across its two calls this is the evidence that says so:
+        # compare the attempted key against the ones actually held.
+        logger.warning(
+            "confirmations: no pending write for %s; currently holding %s",
+            _redact(key),
+            [_redact(k) for k in _pending] or "nothing",
+        )
         return ClaimResult(ClaimStatus.NOTHING_PENDING)
     if pending.expires_at < now:
         del _pending[key]
