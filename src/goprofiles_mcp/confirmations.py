@@ -1,9 +1,13 @@
 """Shared write-confirmation mechanism.
 
 Every write tool routes through this so a mutation always takes two calls: one
-that stages the intended write and returns a token, and one that resubmits the
-same arguments plus that token to actually perform it. A single call can never
-mutate anything.
+that stages the intended write, and one that resubmits the same arguments to
+actually perform it. A single call can never mutate anything.
+
+Pending writes are keyed to the caller, not handed back as a token. The entry's
+existence is itself the proof that this caller staged one, so there is nothing
+for the model to carry between calls, nothing it can forge or replay, and
+nothing opaque for a host to surface in an approval dialog.
 
 Two mechanisms put a human in the loop, in order of strength:
 
@@ -24,15 +28,17 @@ Known limits, both deliberate:
   which is already single-task because MCP session state has the same
   constraint (see ``__main__``). A redeploy drops staged writes; the TTL is
   short and the caller is told to re-stage.
+- Only one pending write per caller per tool. Staging again replaces the
+  previous one, so a fresh preview always supersedes an abandoned one.
 - Under ``MCP_STATELESS=true`` this store still works, but ``ctx.elicit`` does
   not — that flag's documented cost — leaving only the structural gate.
 """
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -48,16 +54,14 @@ class ClaimStatus(Enum):
     """Why a claim succeeded or failed, so callers can explain it usefully."""
 
     OK = "ok"
-    UNKNOWN = "unknown"  # never staged, already consumed, or expired and purged
+    NOTHING_PENDING = "nothing_pending"  # never staged, already used, or purged
     EXPIRED = "expired"
-    WRONG_TOOL = "wrong_tool"
     DRIFTED = "drifted"  # arguments differ from what was staged
     DECLINED = "declined"  # user was asked and said no
 
 
 @dataclass
 class PendingWrite:
-    tool: str
     payload: dict[str, Any]  # what to execute
     confirm_args: dict[str, Any]  # what the caller must resubmit
     expires_at: float
@@ -93,14 +97,43 @@ def _purge_expired_unlocked(now: float) -> None:
         del _pending[key]
 
 
+def _owner_key(ctx: Context, tool: str) -> str:
+    """Identify who a pending write belongs to.
+
+    Scoping to the caller is what removes the need for a token: the existence of
+    an entry under this key already proves this caller staged one, so there is
+    nothing for the model to carry between the two calls — and nothing to leak
+    into a host's approval dialog.
+
+    Prefers the MCP session. Falls back to the bearer token when there is no
+    session header, so the handshake still works under ``MCP_STATELESS=true``;
+    note ``ctx.session_id`` is unusable there because it silently mints a fresh
+    id per request. Including the tool lets different write tools hold
+    independent pending writes for the same caller.
+    """
+    request = ctx.request_context.request if ctx.request_context else None
+    if request is not None:
+        session = request.headers.get("mcp-session-id")
+        if session:
+            return f"session:{session}\n{tool}"
+        auth = request.headers.get("authorization", "")
+        if auth:
+            digest = hashlib.sha256(auth.encode()).hexdigest()
+            return f"bearer:{digest}\n{tool}"
+    # stdio / in-memory transports: no HTTP request, but session_id is stable
+    # for the life of the connection.
+    return f"session:{ctx.session_id}\n{tool}"
+
+
 def stage(
+    ctx: Context,
     *,
     tool: str,
     payload: dict[str, Any],
     confirm_args: dict[str, Any],
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
-) -> str:
-    """Store a pending write and return its opaque single-use token.
+) -> None:
+    """Record a pending write for this caller, replacing any earlier one.
 
     ``payload`` is what will be executed. ``confirm_args`` is what the caller
     will resubmit on the confirming call, and is the only thing compared.
@@ -109,31 +142,29 @@ def stage(
     confirming on human-readable values — so the host's approval prompt shows
     the user a name rather than a number, and the confirming call has no
     parameter capable of redirecting the write.
+
+    Only one pending write per caller per tool: staging again replaces it, so a
+    re-preview always supersedes whatever came before.
     """
-    token = uuid.uuid4().hex
     now = time.time()
     with _lock:
         _purge_expired_unlocked(now)
-        _pending[token] = PendingWrite(
-            tool=tool,
+        _pending[_owner_key(ctx, tool)] = PendingWrite(
             payload=payload,
             confirm_args=_normalize(confirm_args),
             expires_at=now + ttl_seconds,
         )
-    return token
 
 
 def _validate_unlocked(
-    key: str, *, tool: str, confirm_args: dict[str, Any], now: float
+    key: str, *, confirm_args: dict[str, Any], now: float
 ) -> ClaimResult:
     pending = _pending.get(key)
     if pending is None:
-        return ClaimResult(ClaimStatus.UNKNOWN)
+        return ClaimResult(ClaimStatus.NOTHING_PENDING)
     if pending.expires_at < now:
         del _pending[key]
         return ClaimResult(ClaimStatus.EXPIRED)
-    if pending.tool != tool:
-        return ClaimResult(ClaimStatus.WRONG_TOOL)
     if _normalize(confirm_args) != pending.confirm_args:
         return ClaimResult(ClaimStatus.DRIFTED)
     return ClaimResult(ClaimStatus.OK, payload=pending.payload)
@@ -141,29 +172,26 @@ def _validate_unlocked(
 
 async def claim(
     ctx: Context,
-    token: str,
     *,
     tool: str,
     confirm_args: dict[str, Any],
     summary: str,
 ) -> ClaimResult:
-    """Validate a token, confirm with the user, and consume it — in that order.
+    """Find this caller's pending write, confirm it, and consume it — in order.
 
     Returns the staged ``payload``, which is what the caller should act on. The
     resubmitted ``confirm_args`` are only ever compared, never executed.
 
     The entry is consumed **only** on a fully approved claim. Drifted args, a
     declined confirmation, or a crash mid-flight all leave it usable so a
-    corrected retry works with the same token. Validation, confirmation, and
-    consumption live in one call precisely so a caller cannot get that ordering
-    wrong: confirming after consuming would burn the token on every decline.
+    corrected retry works. Lookup, confirmation, and consumption live in one
+    call precisely so a caller cannot get that ordering wrong: confirming after
+    consuming would discard the pending write on every decline.
     """
-    key = token.strip()
+    key = _owner_key(ctx, tool)
 
     with _lock:
-        result = _validate_unlocked(
-            key, tool=tool, confirm_args=confirm_args, now=time.time()
-        )
+        result = _validate_unlocked(key, confirm_args=confirm_args, now=time.time())
     if not result.ok:
         return result
 
@@ -173,9 +201,7 @@ async def claim(
     # Re-validate under the lock before consuming: the elicitation above is an
     # await, so the entry could have expired or been consumed while we waited.
     with _lock:
-        result = _validate_unlocked(
-            key, tool=tool, confirm_args=confirm_args, now=time.time()
-        )
+        result = _validate_unlocked(key, confirm_args=confirm_args, now=time.time())
         if result.ok:
             del _pending[key]
     return result

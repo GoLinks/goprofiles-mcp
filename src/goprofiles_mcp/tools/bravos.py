@@ -300,7 +300,7 @@ async def preview_bravo(
     """Preview a Bravo before sending it. Sends nothing.
 
     Resolves the recipient and badge to their real names, checks both exist, and
-    returns a preview plus a confirmation_token for create_bravo. Nothing is sent
+    returns a preview of exactly what create_bravo will send. Nothing is sent
     and nothing is notified.
 
     Call this once you have all three of: the recipient, the badge, and the
@@ -340,7 +340,8 @@ async def preview_bravo(
             "with search_people and try again with the uid from its results."
         )
 
-    token = stage(
+    stage(
+        ctx,
         tool=_TOOL,
         # Executed on ids the model never resends, so the send call cannot be
         # redirected to a different person or badge.
@@ -358,12 +359,11 @@ async def preview_bravo(
         f"Badge:   {badge.name}\n"
         "Message:\n"
         f"{comment}\n\n"
-        f"confirmation_token: {token}  (tool use only — do not show to the user)\n\n"
         "NEXT STEP — show the user the To / Badge / Message above and ask them to "
         "confirm. Do not call create_bravo until they explicitly say to send it. "
         "When they do, call create_bravo with recipient_name, badge_name, and "
-        "comment copied exactly from this preview, plus this confirmation_token. "
-        "create_bravo takes no uid or bid."
+        "comment copied exactly from this preview. create_bravo takes no uid, bid, "
+        "or token — it sends the Bravo previewed here."
     )
 
 
@@ -401,17 +401,6 @@ async def create_bravo(
             max_length=850,
         ),
     ],
-    confirmation_token: Annotated[
-        str,
-        Field(
-            description=(
-                "The confirmation_token from preview_bravo. Required — there is no "
-                "way to send a Bravo without previewing it first. Never show it to "
-                "the user."
-            ),
-            min_length=1,
-        ),
-    ],
     ctx: Context | None = None,
 ) -> str:
     """Send a Bravo (peer recognition) that the user has already approved.
@@ -435,7 +424,6 @@ async def create_bravo(
 
     result = await claim(
         ctx,
-        confirmation_token,
         tool=_TOOL,
         confirm_args={
             "recipient_name": recipient_name,
@@ -453,26 +441,26 @@ async def create_bravo(
     if result.status is ClaimStatus.DECLINED:
         return (
             "No Bravo sent — the user declined. Ask what they'd like to change. "
-            "The confirmation_token is still valid if they only needed a moment; "
-            "otherwise call preview_bravo again with the new details."
+            "The preview is still valid if they only needed a moment; otherwise "
+            "call preview_bravo again with the new details."
         )
     if result.status is ClaimStatus.DRIFTED:
         return (
             "No Bravo sent — the recipient, badge, or message does not match the "
             "preview. Copy recipient_name, badge_name, and comment verbatim from "
             "the preview_bravo result, or call preview_bravo again if the user "
-            "wants different content. This token is still valid."
+            "wants different content. The preview is still valid."
         )
     if result.status is ClaimStatus.EXPIRED:
         return (
-            "No Bravo sent — the confirmation expired. Call preview_bravo again, "
-            "then re-confirm with the user."
+            "No Bravo sent — the preview expired. Call preview_bravo again, then "
+            "re-confirm with the user."
         )
     if not result.ok:
         return (
-            "No Bravo sent — that confirmation_token is not valid. It may already "
-            "have been used (check whether the Bravo was sent before retrying). "
-            "Call preview_bravo to get a fresh one."
+            "No Bravo sent — there is no Bravo waiting to be sent. It may already "
+            "have been sent (check before retrying). Call preview_bravo first, "
+            "show the user the preview, and send only after they approve it."
         )
 
     # Everything below comes from the staged payload, never from the arguments.
