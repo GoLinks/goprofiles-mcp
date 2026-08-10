@@ -8,6 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
+from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -61,6 +62,20 @@ mcp.add_tool(
         title="Get profile",
         annotations=ToolAnnotations(
             title="Get profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    FunctionTool.from_function(
+        search_celebrations,
+        title="Search celebrations",
+        annotations=ToolAnnotations(
+            title="Search celebrations",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
