@@ -4,6 +4,7 @@
     "fastmcp",
     "golinks",
     "goprofiles",
-    "goprofile"
+    "goprofile",
+    "unmodeled"
   ]
 }
