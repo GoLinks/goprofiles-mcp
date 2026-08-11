@@ -531,6 +531,10 @@ async def get_availability(
     elif meeting is not None:
         end = _format_clock(meeting.end_time, display_zone)
         status = f"In a meeting until {end}{zone_suffix}"
+    elif zone is None:
+        # window is forced None without a timezone — that is not "outside hours".
+        # Calendar already showed no current meeting; hours placement is unknown.
+        status = "Free now — working hours unknown (no timezone set)"
     elif window is None:
         status = "Outside working hours"
     elif window[0] <= now_unix < window[1]:
