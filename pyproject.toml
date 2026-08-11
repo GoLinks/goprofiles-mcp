@@ -9,6 +9,9 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
+    # zoneinfo needs a tz database to resolve naive scheduled times; the slim
+    # base image is not guaranteed to ship /usr/share/zoneinfo.
+    "tzdata>=2024.1",
 ]
 
 [build-system]

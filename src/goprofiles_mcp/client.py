@@ -1,12 +1,18 @@
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 import httpx
+from dotenv import load_dotenv
 from fastmcp import Context
 
 # Sort direction shared across all list/search endpoints
 SortOrder = Literal["asc", "desc"]
+
+# Load repo-root .env when present (local hosting). No-op on ECS / prod images
+# where the file is absent. Does not override vars already set in the process env.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 GOPROFILES_API_URL = os.environ.get("GOPROFILES_API_URL", "https://api.goprofiles.io")
 GOPROFILES_EXTERNAL_REQUEST = (
