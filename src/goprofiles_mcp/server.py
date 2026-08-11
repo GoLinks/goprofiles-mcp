@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
 from goprofiles_mcp.tools.bravos import create_bravo, preview_bravo, search_bravo_types
+from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -152,6 +153,23 @@ mcp.add_tool(
 
 mcp.add_tool(
     _oauth2_tool(
+        search_celebrations,
+        scopes=["profiles:read"],
+        title="Search celebrations",
+        invoking="Searching celebrations…",
+        invoked="Celebrations ready",
+        annotations=ToolAnnotations(
+            title="Search celebrations",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
         search_bravo_types,
         scopes=["bravos:read"],
         title="Search bravo types",
@@ -211,6 +229,7 @@ mcp.add_tool(
         ),
     )
 )
+
 
 class RequireBearerOnMCP(BaseHTTPMiddleware):
     """Return 401 + WWW-Authenticate on /mcp when no Bearer token is present.

@@ -122,7 +122,7 @@ curl -i https://abc123.ngrok-free.app/health
 
 - Keep both the MCP server and the ngrok process running while you test.
 - `/mcp` requires a Bearer token. Full ChatGPT OAuth login needs working GoProfiles authorize/token endpoints; without that, the connector may reach the URL but fail authentication.
-- This server currently has no registered tools, so a successful connect will still show an empty tool list.
+- A successful connect lists the tools in the [Tools](#tools) table below.
 
 ## Docker
 
@@ -135,8 +135,10 @@ docker run --rm -p 8000:8000 goprofiles-mcp
 
 ## Tools
 
-No tools are registered yet. Add modules under `src/goprofiles_mcp/tools/` and register them in `src/goprofiles_mcp/server.py`.
+Tool modules live under `src/goprofiles_mcp/tools/` and are registered in `src/goprofiles_mcp/server.py`. Copy `tools/_template.py` when adding a new one.
 
 | Tool | Description | Scope |
 | ---- | ----------- | ----- |
-| —    | —           | —     |
+| `search_people` | Search and filter the people directory by name, department, title, location, language, skill, interest, and group. Resolves a name to the `uid` other tools need. | `search:read` |
+| `get_profile` | Full profile for one `uid`: bio, title, contact info, skills, interests, groups, languages, certifications. | `profiles:read` |
+| `search_celebrations` | Recent and upcoming birthdays, work anniversaries, and new hires in one merged feed, filterable by type and day window. | `profiles:read` |
