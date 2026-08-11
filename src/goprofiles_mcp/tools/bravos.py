@@ -404,8 +404,9 @@ async def preview_bravo(
                 "('send it Monday morning'). ISO 8601 — include the user's UTC "
                 "offset whenever you know it, e.g. '2026-08-12T09:00:00-07:00'; "
                 "without an offset the time is read as US Pacific. Never invent a "
-                "time. Omit this to send immediately, which is the normal case. A "
-                "scheduled Bravo cannot be cancelled or rescheduled afterwards."
+                "time. Omit this to send immediately, which is the normal case. "
+                "Once scheduled, it cannot be cancelled or rescheduled from this "
+                "chat — the user can still edit it later in GoProfiles."
             ),
         ),
     ] = None,
@@ -478,7 +479,7 @@ async def preview_bravo(
             "comment": comment,
             # Both of these are in confirm_args so they appear in the host's
             # approval prompt and are drift-checked: one is spendable, the other
-            # commits to a delivery that cannot later be recalled.
+            # schedules a delivery that cannot be changed from this chat.
             "points": awarded,
             "send_at": when,
         },
@@ -487,8 +488,9 @@ async def preview_bravo(
     caveats = ""
     if when:
         caveats = (
-            "\nOnce scheduled this CANNOT be cancelled or rescheduled from here — "
-            "tell the user that before they confirm."
+            "\nOnce scheduled, it cannot be cancelled or rescheduled from this "
+            "chat (the user can still edit it later in GoProfiles) — tell them "
+            "that before they confirm."
         )
         if awarded:
             caveats += (
@@ -588,9 +590,9 @@ async def create_bravo(
     approved, and they are checked against the preview rather than sent.
 
     When the preview showed a point count or a send time, pass them — points are
-    deducted from the sender's balance and a send time commits to a delivery that
-    cannot be recalled, so omitting either is treated as a change to the approved
-    Bravo and the send is refused.
+    deducted from the sender's balance and a send time schedules delivery that
+    cannot be changed from this chat (only later in GoProfiles), so omitting
+    either is treated as a change to the approved Bravo and the send is refused.
 
     The sender is always the authenticated user, derived from the access token.
 
@@ -622,7 +624,12 @@ async def create_bravo(
             f"Badge: {badge_name}\n"
             f"Points: {_points_line(awarded)}\n"
             f"Sends: {_send_at_line(when)}\n"
-            + ("Cannot be cancelled once scheduled.\n" if when else "")
+            + (
+                "Cannot be cancelled or rescheduled from this chat once "
+                "scheduled (editable later in GoProfiles).\n"
+                if when
+                else ""
+            )
             + f"\n{comment.strip()}"
         ),
     )
@@ -739,7 +746,8 @@ async def create_bravo(
     if data.scheduled:
         lines.append(f"Sends:      {_send_at_line(sending_when)}")
         lines.append(
-            "Note:       Delivered on the next hourly run at or after that time, "
-            "and it cannot be cancelled from here."
+            "Note:       Delivered on the next hourly run at or after that time. "
+            "Cannot be cancelled or rescheduled from this chat — edit it in "
+            "GoProfiles if needed."
         )
     return "\n".join(lines)
