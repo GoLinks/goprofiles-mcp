@@ -256,24 +256,54 @@ def _format_minutes(minutes: int) -> str:
     return f"{display}:{minute:02d} {suffix}"
 
 
+def _format_day_span(day_indices: list[int]) -> str:
+    """Collapse contiguous day runs; keep gaps visible with commas.
+
+    Same-hour days may be non-contiguous (e.g. a mid-week day off). Spanning
+    labels[0]–labels[-1] would misstate Mon/Tue/Thu/Fri as Mon–Fri.
+    """
+    if not day_indices:
+        return ""
+
+    runs: list[str] = []
+    run_start = day_indices[0]
+    run_end = day_indices[0]
+    for index in day_indices[1:]:
+        if index == run_end + 1:
+            run_end = index
+            continue
+        runs.append(
+            _DAY_LABELS[run_start]
+            if run_start == run_end
+            else f"{_DAY_LABELS[run_start]}–{_DAY_LABELS[run_end]}"
+        )
+        run_start = run_end = index
+    runs.append(
+        _DAY_LABELS[run_start]
+        if run_start == run_end
+        else f"{_DAY_LABELS[run_start]}–{_DAY_LABELS[run_end]}"
+    )
+    return ", ".join(runs)
+
+
 def _format_schedule(hours: WorkingHours) -> str:
     """Render the weekly schedule, collapsing days that share the same window."""
     if not hours.days:
         return "Unknown"
 
-    groups: list[tuple[tuple[int, int], list[str]]] = []
+    groups: list[tuple[tuple[int, int], list[int]]] = []
     for index in range(7):
         entry = hours.days.get(index)
         if entry is None:
             continue
         if groups and groups[-1][0] == entry:
-            groups[-1][1].append(_DAY_LABELS[index])
+            groups[-1][1].append(index)
         else:
-            groups.append((entry, [_DAY_LABELS[index]]))
+            groups.append((entry, [index]))
 
     parts = []
-    for (start, end), labels in groups:
-        span = labels[0] if len(labels) == 1 else f"{labels[0]}–{labels[-1]}"
+    for (start, end), day_indices in groups:
+        span = _format_day_span(day_indices)
         parts.append(f"{_format_minutes(start)} – {_format_minutes(end)} ({span})")
     return "; ".join(parts)
 
