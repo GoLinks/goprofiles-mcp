@@ -1,13 +1,20 @@
 import os
+from collections.abc import Callable
+from typing import Any
 
 import fastmcp
+from fastmcp.apps import AppConfig
+from fastmcp.apps.config import app_config_to_meta_dict
 from fastmcp.tools.function_tool import FunctionTool
+from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
+from goprofiles_mcp.tools.bravos import create_bravo, preview_bravo, search_bravo_types
 from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.people import get_profile, search_people
 
@@ -27,6 +34,8 @@ _REVOKE_URL = os.environ.get(
 )
 _MCP_RESOURCE_URL = os.environ.get("MCP_RESOURCE_URL", "https://mcp.goprofiles.io")
 
+# Union of scopes this server may request. Individual tools declare a subset via
+# securitySchemes — without that, ChatGPT treats every tool as needing all of these.
 _SCOPES = [
     "profiles:read",
     "profiles:write",
@@ -40,12 +49,81 @@ _SCOPES = [
 # the connector domain.
 _OPENAI_CHALLENGE_TOKEN = os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN", "")
 
+
+class _ScopedFunctionTool(FunctionTool):
+    """FunctionTool that emits Apps SDK `securitySchemes` on tools/list.
+
+    FastMCP's to_mcp_tool does not forward securitySchemes. Without a per-tool
+    declaration, ChatGPT inherits scopes_supported for every tool.
+    """
+
+    security_schemes: list[dict[str, Any]] = Field(default_factory=list)
+
+    def to_mcp_tool(self, **overrides: Any) -> MCPTool:
+        mcp_tool = super().to_mcp_tool(**overrides)
+        schemes = overrides.get("securitySchemes", self.security_schemes)
+        if not schemes:
+            return mcp_tool
+        payload = mcp_tool.model_dump(by_alias=True, exclude_none=True)
+        payload["securitySchemes"] = schemes
+        return MCPTool.model_validate(payload)
+
+
+def _oauth2_tool(
+    fn: Callable[..., Any],
+    *,
+    scopes: list[str],
+    title: str,
+    annotations: ToolAnnotations,
+    invoking: str,
+    invoked: str,
+    app: AppConfig | None = None,
+    extra_meta: dict[str, Any] | None = None,
+    output_schema: dict[str, Any] | None = None,
+) -> _ScopedFunctionTool:
+    """Register-ready tool with oauth2 securitySchemes and ChatGPT status strings.
+
+    `invoking` / `invoked` are ChatGPT Apps SDK status strings (max 64 chars).
+    Optional `app` sets `_meta.ui` (resourceUri / visibility) for MCP Apps.
+    """
+    if len(invoking) > 64 or len(invoked) > 64:
+        raise ValueError("ChatGPT toolInvocation status strings must be ≤64 chars")
+
+    meta: dict[str, Any] = {
+        "openai/toolInvocation/invoking": invoking,
+        "openai/toolInvocation/invoked": invoked,
+        **(extra_meta or {}),
+    }
+    if app is not None:
+        meta["ui"] = app_config_to_meta_dict(app)
+        if app.resource_uri:
+            meta.setdefault("openai/outputTemplate", app.resource_uri)
+
+    # Omit output_schema when unset — passing None disables FastMCP's auto-inferred
+    # schema for str-returning tools (ChatGPT then sees no outputSchema).
+    from_fn_kwargs: dict[str, Any] = {
+        "title": title,
+        "annotations": annotations,
+        "meta": meta,
+    }
+    if output_schema is not None:
+        from_fn_kwargs["output_schema"] = output_schema
+    base = FunctionTool.from_function(fn, **from_fn_kwargs)
+    data = base.model_dump()
+    data["fn"] = base.fn
+    data["security_schemes"] = [{"type": "oauth2", "scopes": list(scopes)}]
+    return _ScopedFunctionTool.model_validate(data)
+
+
 mcp = fastmcp.FastMCP("GoProfiles")
 
 mcp.add_tool(
-    FunctionTool.from_function(
+    _oauth2_tool(
         search_people,
+        scopes=["search:read"],
         title="Search people",
+        invoking="Searching people…",
+        invoked="People search complete",
         annotations=ToolAnnotations(
             title="Search people",
             readOnlyHint=True,
@@ -57,9 +135,12 @@ mcp.add_tool(
 )
 
 mcp.add_tool(
-    FunctionTool.from_function(
+    _oauth2_tool(
         get_profile,
+        scopes=["profiles:read"],
         title="Get profile",
+        invoking="Loading profile…",
+        invoked="Profile ready",
         annotations=ToolAnnotations(
             title="Get profile",
             readOnlyHint=True,
@@ -71,15 +152,80 @@ mcp.add_tool(
 )
 
 mcp.add_tool(
-    FunctionTool.from_function(
+    _oauth2_tool(
         search_celebrations,
+        scopes=["profiles:read"],
         title="Search celebrations",
+        invoking="Searching celebrations…",
+        invoked="Celebrations ready",
         annotations=ToolAnnotations(
             title="Search celebrations",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
             openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        search_bravo_types,
+        scopes=["bravos:read"],
+        title="Search bravo types",
+        invoking="Searching bravo types…",
+        invoked="Bravo types ready",
+        annotations=ToolAnnotations(
+            title="Search bravo types",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+# Read-only so hosts do not prompt: this stages and previews but sends nothing.
+# Splitting it out of create_bravo is what reduces the flow to a single write
+# approval instead of one on each call of a single write-annotated tool.
+# bravos:read verifies the bid; profiles:read verifies the recipient uid.
+mcp.add_tool(
+    _oauth2_tool(
+        preview_bravo,
+        scopes=["bravos:read", "profiles:read"],
+        title="Preview bravo",
+        invoking="Preparing Bravo preview…",
+        invoked="Bravo preview ready",
+        annotations=ToolAnnotations(
+            title="Preview bravo",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+)
+
+# No `app=AppConfig(...)` here, deliberately: that emits `_meta.ui`, which made
+# ChatGPT drop the tool at discovery rather than error. Keep this registration
+# shaped exactly like the read-only tools above.
+# profiles:read re-verifies the recipient still exists immediately before sending.
+mcp.add_tool(
+    _oauth2_tool(
+        create_bravo,
+        scopes=["bravos:write", "profiles:read"],
+        title="Create bravo",
+        invoking="Sending Bravo…",
+        invoked="Bravo finished",
+        annotations=ToolAnnotations(
+            title="Create bravo",
+            readOnlyHint=False,
+            # A Bravo destroys nothing, but it is irreversible and notifies a
+            # coworker. Hosts key extra approval friction off this hint, and on a
+            # client with no elicitation that prompt is part of the gate.
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
         ),
     )
 )
