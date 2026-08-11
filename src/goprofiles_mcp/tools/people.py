@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from goprofiles_mcp.client import (
     SortOrder,
+    api_get,
     external_params,
     get_authorization_header,
     http_client,
@@ -375,28 +376,6 @@ def _format_profile(p: Profile) -> str:
     return "\n".join(lines)
 
 
-async def _api_get(
-    path: str,
-    params: dict,
-    authorization: str,
-    *,
-    not_found_message: str | None = None,
-) -> httpx.Response:
-    try:
-        response = await http_client.get(
-            path,
-            params=params,
-            headers={"Authorization": authorization},
-        )
-    except httpx.TimeoutException:
-        raise TimeoutError("Request to GoProfiles API timed out.")
-    except httpx.ConnectError:
-        raise ConnectionError("Failed to connect to GoProfiles API.")
-
-    raise_for_status(response, path, not_found_message=not_found_message)
-    return response
-
-
 async def _enrichment_results(
     path: str,
     params: dict,
@@ -405,7 +384,7 @@ async def _enrichment_results(
 ) -> list[dict[str, Any]]:
     """Fetch an enrichment list endpoint; treat 404 as an empty list."""
     try:
-        response = await _api_get(path, params, authorization)
+        response = await api_get(path, params, authorization)
     except LookupError:
         return []
     return response_model.model_validate(response.json()).results
@@ -666,7 +645,7 @@ async def get_profile(
 
     user_params = external_params({"uid": uid}, tool="get_profile")
     try:
-        user_response = await _api_get(
+        user_response = await api_get(
             "/users.php",
             user_params,
             authorization,

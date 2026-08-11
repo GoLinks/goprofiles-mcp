@@ -142,3 +142,4 @@ Tool modules live under `src/goprofiles_mcp/tools/` and are registered in `src/g
 | `search_people` | Search and filter the people directory by name, department, title, location, language, skill, interest, and group. Resolves a name to the `uid` other tools need. | `search:read` |
 | `get_profile` | Full profile for one `uid`: bio, title, contact info, skills, interests, groups, languages, certifications. | `profiles:read` |
 | `search_celebrations` | Recent and upcoming birthdays, work anniversaries, and new hires in one merged feed, filterable by type and day window. | `profiles:read` |
+| `get_availability` | Whether one `uid` is available right now: local time, working hours, current meeting, open blocks left today, and next time off. Combines the workspace's connected calendar (Google or Outlook) with their configured working hours. | `profiles:read` |
