@@ -142,3 +142,7 @@ Tool modules live under `src/goprofiles_mcp/tools/` and are registered in `src/g
 | `search_people` | Search and filter the people directory by name, department, title, location, language, skill, interest, and group. Resolves a name to the `uid` other tools need. | `search:read` |
 | `get_profile` | Full profile for one `uid`: bio, title, contact info, skills, interests, groups, languages, certifications. | `profiles:read` |
 | `search_celebrations` | Recent and upcoming birthdays, work anniversaries, and new hires in one merged feed, filterable by type and day window. | `profiles:read` |
+| `search_bravos` | History of bravos already given, newest first, filterable by day window, person (giver or receiver), and giver/receiver department. Returns badge, when it was given, giver, receiver, points, and message. | `bravos:read` |
+| `search_bravo_types` | The catalog of badge types that can be given, each with the `bid` `preview_bravo` needs. | `bravos:read` |
+| `preview_bravo` | Resolves a recipient and badge and returns a preview for the user to approve. Stages the send but sends nothing. | `bravos:read`, `profiles:read` |
+| `create_bravo` | Sends the Bravo the user approved from `preview_bravo`. Irreversible and notifies the recipient. | `bravos:write`, `profiles:read` |

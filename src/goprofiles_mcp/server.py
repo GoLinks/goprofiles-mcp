@@ -14,7 +14,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
-from goprofiles_mcp.tools.bravos import create_bravo, preview_bravo, search_bravo_types
+from goprofiles_mcp.tools.bravos import (
+    create_bravo,
+    preview_bravo,
+    search_bravo_types,
+    search_bravos,
+)
 from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.people import get_profile, search_people
 
@@ -160,6 +165,23 @@ mcp.add_tool(
         invoked="Celebrations ready",
         annotations=ToolAnnotations(
             title="Search celebrations",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        search_bravos,
+        scopes=["bravos:read"],
+        title="Search bravos",
+        invoking="Searching bravos…",
+        invoked="Bravos ready",
+        annotations=ToolAnnotations(
+            title="Search bravos",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
