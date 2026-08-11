@@ -278,6 +278,37 @@ def _format_schedule(hours: WorkingHours) -> str:
     return "; ".join(parts)
 
 
+def _format_meetings(
+    events: list[CalendarEvent],
+    now_unix: int,
+    display_zone: ZoneInfo,
+    zone_suffix: str,
+) -> list[str]:
+    """One line per remaining meeting, in order.
+
+    Deliberately NOT merged: merging is only for computing free gaps, and a
+    merged block hides how a long busy stretch is actually divided up. Two
+    entries can overlap — that means the person is double-booked.
+    """
+    upcoming = [event for event in events if event.end_time > now_unix]
+    if not upcoming:
+        return ["None"]
+
+    rendered: list[str] = []
+    for event in sorted(upcoming, key=lambda e: (e.start_time, e.end_time)):
+        if event.is_all_day:
+            rendered.append("All day")
+            continue
+        start = _format_clock(event.start_time, display_zone)
+        end = _format_clock(event.end_time, display_zone)
+        line = f"{start} – {end}{zone_suffix}"
+        # Flag the one covering now so "busy until X" is traceable to a meeting.
+        if event.start_time <= now_unix <= event.end_time:
+            line += "  (in progress)"
+        rendered.append(line)
+    return rendered
+
+
 def _format_ooo(ooo: CalendarEvent | None, zone: ZoneInfo | None) -> str:
     if ooo is None:
         return "None scheduled"
@@ -373,8 +404,12 @@ async def get_availability(
 
     Combines their connected calendar (Google or Outlook, whichever the workspace
     uses) with the working hours configured on their GoProfiles profile: their
-    local time, whether they are on the clock, whether they are in a meeting,
-    the open blocks left in their working day, and their next time off.
+    local time, whether they are on the clock, the start and end time of every
+    meeting left in their day, the open blocks between those meetings, and their
+    next time off.
+
+    Meeting times only — the calendar API deliberately withholds titles,
+    locations, and attendees, so never claim to know what a meeting is about.
 
     Scoped to today — it reports what is left of the person's current working
     day, not future dates. Use after search_people has resolved a name to a uid.
@@ -473,6 +508,14 @@ async def get_availability(
     else:
         status = "Outside working hours"
     lines.append(f"Status:         {status}")
+
+    # The meetings themselves, before any merging — this is what tells the user
+    # how a long busy stretch breaks down, which the free gaps alone can't show.
+    if reading.outcome == "ok":
+        meetings = _format_meetings(reading.events, now_unix, display_zone, zone_suffix)
+        lines.append(f"Meetings left:  {meetings[0]}")
+        # Continuations line up under the first entry's column.
+        lines.extend(f"{'':16}{line}" for line in meetings[1:])
 
     if window is None:
         # Distinguish "we can't place the day on a clock" from "today is a day off".
