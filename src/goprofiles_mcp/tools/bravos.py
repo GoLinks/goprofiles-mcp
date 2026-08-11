@@ -196,7 +196,9 @@ async def _recipient_name(uid: int, authorization: str) -> str | None:
 
     first = str(raw.get("first_name") or "").strip()
     last = str(raw.get("last_name") or "").strip()
-    return f"{first} {last}".strip() or str(raw.get("username") or "").strip() or "Unknown"
+    return (
+        f"{first} {last}".strip() or str(raw.get("username") or "").strip() or "Unknown"
+    )
 
 
 async def _fetch_bravo_types(authorization: str, *, tool: str) -> list[BravoTypeResult]:
@@ -505,7 +507,11 @@ async def preview_bravo(
         f"Badge:   {badge.name}\n"
         f"Points:  {_points_line(awarded)}\n"
         f"Sends:   {_send_at_line(when)}\n"
-        + ("         Delivered on the next hourly run at or after that time.\n" if when else "")
+        + (
+            "         Delivered on the next hourly run at or after that time.\n"
+            if when
+            else ""
+        )
         + "Message:\n"
         f"{comment}\n"
         f"{caveats}\n"
