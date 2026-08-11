@@ -21,14 +21,7 @@ from goprofiles_mcp.client import (
 )
 from goprofiles_mcp.confirmations import ClaimStatus, claim, stage
 
-# Only the create/confirm flow keys off this — it is the staging key, not a
-# general "which tool am I" stamp. Read tools pass their own name to
-# external_params.
 _TOOL = "create_bravo"
-
-# activity.php interpolates `days` straight into DATE_SUB(... INTERVAL $days DAY)
-# and enforces no upper bound, so cap it here the way celebrations does.
-_MAX_ACTIVITY_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -410,8 +403,11 @@ async def search_bravos(
                 "window wide enough to cover the dates the user asked about and "
                 "read the exact 'Given' timestamp off each result."
             ),
+            # ge=1 because activity.php discards days=0 as falsy and answers with
+            # an unfiltered feed; le=365 because it enforces no upper bound of its
+            # own and interpolates the value into DATE_SUB(... INTERVAL n DAY).
             ge=1,
-            le=_MAX_ACTIVITY_DAYS,
+            le=365,
         ),
     ] = None,
     person_name: Annotated[
