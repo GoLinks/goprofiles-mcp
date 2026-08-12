@@ -551,7 +551,14 @@ async def search_bravos(
                 f"{m.total_results} result(s) in total. Lower 'offset' to page back "
                 "through them."
             )
-        remedies = ["widen the window with 'days', or omit it to search all time"]
+        remedies: list[str] = []
+        # Only suggest widening days when a window was actually applied —
+        # omitting days already searched all time, so that tip contradicts
+        # the filter summary and wastes a follow-up call.
+        if days is not None:
+            remedies.append(
+                "widen the window with 'days', or omit it to search all time"
+            )
         if person:
             remedies.append(
                 f"'{person}' is matched as a substring of 'first last', so a "
@@ -563,10 +570,10 @@ async def search_bravos(
                 "exactly, and note that passing both giver_departments and "
                 "receiver_departments requires BOTH to match"
             )
-        return (
-            f"No bravos found for: {summary}. Tell the user nothing matched, then "
-            "adjust one filter at a time — " + "; ".join(remedies) + "."
-        )
+        msg = f"No bravos found for: {summary}. Tell the user nothing matched"
+        if remedies:
+            msg += ", then adjust one filter at a time — " + "; ".join(remedies)
+        return msg + "."
 
     header = (
         f"Bravos ({m.count} of {m.total_results} total, offset {m.offset}) — "
