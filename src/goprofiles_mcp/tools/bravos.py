@@ -242,8 +242,12 @@ def _sent_line(ts: int | None) -> str:
 
 
 def _person(first: str, last: str, username: str | None, department: str | None) -> str:
-    name = f"{first} {last}".strip() or username or "Unknown"
-    if username:
+    # Blank first/last is a known stub case — fall back to username once, same as
+    # people/celebrations. Don't re-append it in parentheses when it already is
+    # the display name (that produced 'jdoe (jdoe)').
+    full = f"{first} {last}".strip()
+    name = full or username or "Unknown"
+    if full and username:
         name = f"{name} ({username})"
     # department is a LEFT JOIN, so absent is normal rather than an error.
     return f"{name} — {department}" if department else name
