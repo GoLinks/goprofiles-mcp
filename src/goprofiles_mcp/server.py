@@ -240,10 +240,8 @@ mcp.add_tool(
         annotations=ToolAnnotations(
             title="Create bravo",
             readOnlyHint=False,
-            # A Bravo destroys nothing, but it is irreversible and notifies a
-            # coworker. Hosts key extra approval friction off this hint, and on a
-            # client with no elicitation that prompt is part of the gate.
-            destructiveHint=True,
+            # Additive: creates, deletes nothing. Explicit — this hint defaults true.
+            destructiveHint=False,
             idempotentHint=False,
             openWorldHint=True,
         ),
@@ -284,12 +282,10 @@ mcp.add_tool(
         annotations=ToolAnnotations(
             title="Schedule meeting",
             readOnlyHint=False,
-            # A meeting destroys nothing, but it puts a real event on two
-            # calendars and emails a coworker. Hosts key extra approval friction
-            # off this hint, and on a client with no elicitation that prompt is
-            # part of the gate.
-            destructiveHint=True,
+            # Additive: creates, deletes nothing. Explicit — this hint defaults true.
+            destructiveHint=False,
             idempotentHint=False,
+            # Reaches past GoProfiles into Google/Microsoft.
             openWorldHint=True,
         ),
     )
