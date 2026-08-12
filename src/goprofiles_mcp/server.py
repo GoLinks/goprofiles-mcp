@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp
 
+from goprofiles_mcp.tools.availability import get_availability
 from goprofiles_mcp.tools.bravos import (
     create_bravo,
     preview_bravo,
@@ -168,6 +169,24 @@ mcp.add_tool(
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        get_availability,
+        scopes=["profiles:read"],
+        title="Get availability",
+        invoking="Checking availability…",
+        invoked="Availability ready",
+        annotations=ToolAnnotations(
+            title="Get availability",
+            readOnlyHint=True,
+            destructiveHint=False,
+            # The answer changes minute to minute — not safe to cache or replay.
+            idempotentHint=False,
             openWorldHint=False,
         ),
     )

@@ -65,6 +65,29 @@ def raise_for_status(
     )
 
 
+async def api_get(
+    path: str,
+    params: dict,
+    authorization: str,
+    *,
+    not_found_message: str | None = None,
+) -> httpx.Response:
+    """GET a GoProfiles endpoint, translating transport and HTTP errors alike."""
+    try:
+        response = await http_client.get(
+            path,
+            params=params,
+            headers={"Authorization": authorization},
+        )
+    except httpx.TimeoutException:
+        raise TimeoutError("Request to GoProfiles API timed out.")
+    except httpx.ConnectError:
+        raise ConnectionError("Failed to connect to GoProfiles API.")
+
+    raise_for_status(response, path, not_found_message=not_found_message)
+    return response
+
+
 def format_timestamp(ts: int | None) -> str:
     """Format a Unix timestamp (seconds) as 'YYYY-MM-DD HH:MM UTC'."""
     if ts is None:
