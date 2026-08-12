@@ -19,7 +19,11 @@ from goprofiles_mcp.client import (
     raise_for_status,
 )
 from goprofiles_mcp.confirmations import ClaimStatus, claim, stage
-from goprofiles_mcp.tools.availability import CalendarEvent, CalendarResponse
+from goprofiles_mcp.tools.availability import (
+    CalendarEvent,
+    CalendarResponse,
+    as_event,
+)
 
 _TOOL = "schedule_meeting"
 
@@ -55,9 +59,10 @@ _MAX_SCHEDULE_AHEAD = timedelta(days=365)
 
 
 class ScheduleMeetingResponse(BaseModel):
-    # Google returns only `link`. Outlook also sends `meeting_link`, which is
-    # null when the event carries no online meeting.
-    link: str = ""
+    # Both nullable: this is parsed only after the invite already exists and the
+    # staged write is spent, so a validation error here would report failure for
+    # a meeting that was created — and a retry would book a second one.
+    link: str | None = None
     meeting_link: str | None = None
 
 
@@ -109,20 +114,6 @@ def _invite_path(read_path: str) -> str:
     return f"{read_path}/schedule_meeting.php"
 
 
-def _as_ooo(raw: Any) -> CalendarEvent | None:
-    """Coerce an `ooo` payload to an event, treating PHP's empty array as absent.
-
-    Same normalization get_availability applies — PHP encodes "no OOO event" as
-    an empty array, so the field is a dict when set and a list when not.
-    """
-    if not isinstance(raw, dict) or not raw:
-        return None
-    event = CalendarEvent.model_validate(raw)
-    if not event.start_time and not event.end_time:
-        return None
-    return event
-
-
 async def _probe_provider(
     read_path: str, label: str, uid: int, authorization: str
 ) -> ProviderProbe:
@@ -166,7 +157,7 @@ async def _probe_provider(
         return probe
 
     probe.events = data.events
-    probe.ooo = _as_ooo(data.ooo)
+    probe.ooo = as_event(data.ooo)
     return probe
 
 
@@ -416,6 +407,29 @@ def _check_conflicts(
         )
 
     horizon = _end_of_their_day(attendee.timezone)
+
+    # A clash is positive evidence and settles the question, so it is looked for
+    # before asking how much of the slot was visible. Only meaningful while the
+    # slot starts inside the day the feed covers — an all-day event today says
+    # nothing about next Tuesday.
+    if horizon is not None and slot_start < horizon:
+        clashes = [
+            e
+            for e in probe.events
+            # An all-day event blankets the day whatever its timestamps say;
+            # get_availability documents that Outlook's are not to be trusted.
+            if e.is_all_day or _overlaps(e, slot_start, slot_end)
+        ]
+        if clashes:
+            busy = ", ".join(
+                "all day" if e.is_all_day else _span(e, zone)
+                for e in sorted(clashes, key=lambda e: (e.start_time, e.end_time))
+            )
+            return ConflictCheck(
+                state="conflict",
+                detail=f"they are already booked during this slot ({busy})",
+            )
+
     if horizon is None:
         return ConflictCheck(
             detail=(
@@ -423,25 +437,20 @@ def _check_conflicts(
                 "lined up against this slot"
             )
         )
-    if slot_start >= horizon:
-        # The common case for any future booking, and the one that must never
-        # read as an all-clear.
+    # The feed stops at their midnight, so a slot reaching past it is at least
+    # partly unseen. Every future booking lands here, and it must never read as
+    # an all-clear.
+    if slot_end > horizon:
         return ConflictCheck(
             detail=(
-                "this slot is past the end of their current day, and only the "
-                "rest of today's meetings are visible"
+                (
+                    "this slot is past the end of their current day"
+                    if slot_start >= horizon
+                    else "this slot runs past the end of their current day, so "
+                    "the part after midnight was not checked"
+                )
+                + ", and only the rest of today's meetings are visible"
             )
-        )
-
-    clashes = [e for e in probe.events if _overlaps(e, slot_start, slot_end)]
-    if clashes:
-        busy = ", ".join(
-            "all day" if e.is_all_day else _span(e, zone)
-            for e in sorted(clashes, key=lambda e: (e.start_time, e.end_time))
-        )
-        return ConflictCheck(
-            state="conflict",
-            detail=f"they are already booked during this slot ({busy})",
         )
 
     return ConflictCheck(
