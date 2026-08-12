@@ -1,7 +1,9 @@
-"""Bravo tools — badge catalog search and confirmed Bravo creation."""
+"""Bravo tools — badge catalog search, bravo history, and confirmed Bravo creation."""
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
@@ -12,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from goprofiles_mcp.client import (
     external_params,
+    format_timestamp,
     get_authorization_header,
     http_client,
     raise_for_status,
@@ -33,6 +36,49 @@ class BravoTypeResult(BaseModel):
 
 class BravoTypesResponse(BaseModel):
     results: list[BravoTypeResult] = []
+
+
+class BravoActivityResult(BaseModel):
+    """One already-sent bravo from the activity feed.
+
+    The API row also carries both people's emails, four image URLs, the badge's
+    bid, `mentions`, and `giver_is_manager`. Leaving them off the model is the
+    allow-list: pydantic drops unmodeled keys, so they never reach the agent.
+    Two are worth naming — `mentions` arrives as a GROUP_CONCAT string or as a
+    list of dicts depending on whether the mentioned users resolved, and `bid`
+    belongs to search_bravo_types, which is the only sanctioned source for it.
+    """
+
+    ubid: int = 0
+    # Unix seconds, COALESCE(scheduled_time, created_at) — the effective send
+    # time, which can sit slightly in the future for a scheduled bravo.
+    created_at: int | None = None
+    # The badge name. The API calls it 'name'; rendered as 'Bravo'.
+    name: str = ""
+    points: int | None = None
+    comment: str | None = None
+    receiver_first_name: str = ""
+    receiver_last_name: str = ""
+    receiver_username: str | None = None
+    receiver_uid: int = 0
+    receiver_department: str | None = None
+    giver_first_name: str = ""
+    giver_last_name: str = ""
+    giver_username: str | None = None
+    giver_uid: int = 0
+    giver_department: str | None = None
+
+
+class BravoActivityMetadata(BaseModel):
+    limit: int = 0
+    offset: int = 0
+    total_results: int = 0
+    count: int = 0
+
+
+class BravoActivityResponse(BaseModel):
+    metadata: BravoActivityMetadata = BravoActivityMetadata()
+    results: list[BravoActivityResult] = []
 
 
 class CreateBravoResponse(BaseModel):
@@ -153,6 +199,19 @@ def _relative(seconds: float) -> str:
     return f"about {hours // 24} day{'s' if hours // 24 != 1 else ''} from now"
 
 
+def _ago(seconds: float) -> str:
+    """Past-tense counterpart to _relative, for bravos already sent."""
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        value = max(minutes, 1)
+        return f"{value} minute{'s' if value != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
 def _send_at_line(epoch: int) -> str:
     """Absolute time plus a relative form.
 
@@ -164,6 +223,116 @@ def _send_at_line(epoch: int) -> str:
     when = datetime.fromtimestamp(epoch, tz=_DEFAULT_TZ)
     stamp = when.strftime("%a %d %b %Y, %H:%M %Z (UTC%z)")
     return f"{stamp} — {_relative(epoch - datetime.now(UTC).timestamp())}"
+
+
+def _sent_line(ts: int | None) -> str:
+    """Absolute UTC plus a relative clause, for a bravo in the activity feed.
+
+    UTC rather than _DEFAULT_TZ: that constant exists to resolve naive *input*
+    for scheduling, and every read-only tool in this server renders UTC.
+    """
+    if not ts:
+        return "Unknown"
+    delta = datetime.now(UTC).timestamp() - ts
+    # A scheduled bravo is already flagged sent while its time is still ahead,
+    # so don't render that as '0 minutes ago'.
+    if delta < 0:
+        return f"{format_timestamp(ts)} ({_relative(-delta)})"
+    return f"{format_timestamp(ts)} ({_ago(delta)})"
+
+
+def _person(first: str, last: str, username: str | None, department: str | None) -> str:
+    # Blank first/last is a known stub case — fall back to username once, same as
+    # people/celebrations. Don't re-append it in parentheses when it already is
+    # the display name (that produced 'jdoe (jdoe)').
+    full = f"{first} {last}".strip()
+    name = full or username or "Unknown"
+    if full and username:
+        name = f"{name} ({username})"
+    # department is a LEFT JOIN, so absent is normal rather than an error.
+    return f"{name} — {department}" if department else name
+
+
+def _format_bravo_activity(b: BravoActivityResult) -> str:
+    giver = _person(
+        b.giver_first_name, b.giver_last_name, b.giver_username, b.giver_department
+    )
+    receiver = _person(
+        b.receiver_first_name,
+        b.receiver_last_name,
+        b.receiver_username,
+        b.receiver_department,
+    )
+    lines = [
+        f"Bravo:     {b.name or 'Unknown'}",
+        f"Given:     {_sent_line(b.created_at)}",
+        f"From:      {giver}",
+        f"To:        {receiver}",
+    ]
+    # Most bravos carry no points and no message; printing 'none' on every row
+    # of a long feed is noise.
+    if b.points:
+        lines.append(f"Points:    {b.points}")
+    if b.comment and b.comment.strip():
+        lines.append(f"Comment:   {b.comment.strip()}")
+    # uids are for follow-up get_profile calls only.
+    lines.append(
+        f"uid:       from {b.giver_uid} → to {b.receiver_uid}  "
+        "(tool use only — do not show to the user)"
+    )
+    return "\n".join(lines)
+
+
+# Department filters take name_id SLUGS, but no OAuth-reachable endpoint lists
+# them — /d/api/departments refuses OAuth tokens outright. So the model passes
+# the display names it already has from search_people/get_profile, and we derive
+# the slug the same way the API does in Helpers::convertToNameID.
+_NON_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
+
+
+def _department_slug(name: str) -> str:
+    """'Customer Success' -> 'customer-success'; 'R&D' -> 'r-d'.
+
+    Unescaping first is load-bearing: a department stored as 'R&amp;D' slugifies
+    to 'r-d' server-side, but to 'r-amp-d' without it. Returns '' when nothing
+    usable survives (an emoji- or non-Latin-only name), which Validate::nameID
+    would reject with a 422.
+    """
+    return _NON_SLUG_CHARS.sub("-", html.unescape(name).strip().lower()).strip("-")
+
+
+def _department_slugs(names: list[str] | None) -> tuple[list[str], list[str]]:
+    """Slugify a department filter. Returns (slugs, names that slugified away)."""
+    slugs: list[str] = []
+    unusable: list[str] = []
+    for name in names or []:
+        slug = _department_slug(name)
+        if not slug:
+            unusable.append(name)
+        elif slug not in slugs:
+            slugs.append(slug)
+    return slugs, unusable
+
+
+def _filters_summary(
+    days: int | None,
+    person_name: str | None,
+    giver_departments: list[str] | None,
+    receiver_departments: list[str] | None,
+) -> str:
+    """Echo the filters that produced a result set, for the header and the
+    empty-result prose — the caller cannot otherwise tell an empty feed from a
+    filter that matched nothing."""
+    parts = [f"last {days} day{'s' if days != 1 else ''}" if days else "all time"]
+    if person_name:
+        parts.append(f"'{person_name}' as giver or receiver")
+    if giver_departments:
+        parts.append("given by " + ", ".join(giver_departments))
+    if receiver_departments:
+        parts.append("received by " + ", ".join(receiver_departments))
+    if len(parts) == 1:
+        parts.append("everyone")
+    return "; ".join(parts)
 
 
 async def _recipient_name(uid: int, authorization: str) -> str | None:
@@ -226,6 +395,212 @@ async def _fetch_bravo_types(authorization: str, *, tool: str) -> list[BravoType
 # ---------------------------------------------------------------------------
 
 
+async def search_bravos(
+    days: Annotated[
+        int | None,
+        Field(
+            description=(
+                "How many days back to look, 1–365 — a rolling window ending now, "
+                "so days=1 is the last 24 hours. Omit it to search all time. This "
+                "is the ONLY date filter: there is no calendar-date parameter and "
+                "no way to look at a window that ended in the past, so pick a "
+                "window wide enough to cover the dates the user asked about and "
+                "read the exact 'Given' timestamp off each result."
+            ),
+            # ge=1 because activity.php discards days=0 as falsy and answers with
+            # an unfiltered feed; le=365 because it enforces no upper bound of its
+            # own and interpolates the value into DATE_SUB(... INTERVAL n DAY).
+            ge=1,
+            le=365,
+        ),
+    ] = None,
+    person_name: Annotated[
+        str | None,
+        Field(
+            description=(
+                "A person's name, e.g. 'Jane Roe' or just 'Roe'. Matched as a "
+                "case-insensitive substring of 'first last', so a misspelling "
+                "returns nothing.\n"
+                "NOT directional: this returns bravos the person GAVE as well as "
+                "bravos they RECEIVED, and the API offers no way to ask for only "
+                "one direction. If the user asked about only one, read the 'From' "
+                "and 'To' lines of each result to tell them apart, and say which "
+                "you are reporting."
+            )
+        ),
+    ] = None,
+    giver_departments: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Only bravos GIVEN by someone in these departments. Pass department "
+                "display names exactly as they appear in search_people or "
+                "get_profile results, e.g. ['Engineering', 'Customer Success'] — do "
+                "not invent department names and do not convert them to slugs."
+            )
+        ),
+    ] = None,
+    receiver_departments: Annotated[
+        list[str] | None,
+        Field(
+            description=(
+                "Only bravos RECEIVED by someone in these departments, same format "
+                "as 'giver_departments'. Passing both narrows to bravos matching "
+                "BOTH at once (e.g. Engineering thanking Sales), not either one."
+            )
+        ),
+    ] = None,
+    limit: Annotated[
+        int, Field(description="Number of bravos to return (1–100).", ge=1, le=100)
+    ] = 20,
+    offset: Annotated[int, Field(description="Pagination offset (0-based).", ge=0)] = 0,
+    ctx: Context | None = None,
+) -> str:
+    """Search the history of Bravos already given in the user's GoProfiles
+    workspace (https://www.goprofiles.io) — peer recognition that has been sent.
+
+    This is the recognition FEED, not the badge catalog and not a way to send
+    anything: use search_bravo_types to see which badges exist, and
+    preview_bravo to send one. Use this tool to answer questions about what
+    already happened — who was recognized recently, what someone has been
+    thanked for, which teams are giving recognition.
+
+    Each result gives the badge, when it was given, who gave it, who received
+    it, their departments, any points, and the message. Results are always
+    newest first; there is no sort option.
+
+    Filters combine (they narrow each other, never widen). Date filtering is a
+    relative past-only day window, not calendar dates. The person filter is not
+    directional — it matches the giver or the receiver — so check 'From' and 'To'
+    before telling the user someone gave rather than received a bravo.
+
+    Each entry carries numeric 'uid' values for follow-up get_profile calls.
+    Never show, read aloud, or otherwise expose them; refer to people by name,
+    username, or department instead.
+
+    Read-only. Requires bravos:read scope.
+    """
+    if ctx is None:
+        raise PermissionError("Missing request context.")
+    authorization = get_authorization_header(ctx)
+
+    # Normalize once, so the filter that gets sent and the filter that gets
+    # echoed back in the header are the same string.
+    person = (person_name or "").strip() or None
+
+    giver_slugs, giver_unusable = _department_slugs(giver_departments)
+    receiver_slugs, receiver_unusable = _department_slugs(receiver_departments)
+    # A filter whose every name slugified away would silently vanish from the
+    # query and return an unfiltered feed that reads like an answer. Refuse
+    # instead of answering the wrong question.
+    for label, requested, slugs in (
+        ("giver_departments", giver_departments, giver_slugs),
+        ("receiver_departments", receiver_departments, receiver_slugs),
+    ):
+        if requested and not slugs:
+            return (
+                f"No bravos fetched — none of the {label} names contain letters or "
+                "digits, so that filter could not be applied and the results would "
+                "have been unfiltered. Pass department names as they appear in "
+                "search_people results."
+            )
+
+    # Echo only the departments that survived slugification; the footer names the
+    # dropped ones separately rather than implying they were applied.
+    giver_used = [n for n in giver_departments or [] if n not in giver_unusable]
+    receiver_used = [
+        n for n in receiver_departments or [] if n not in receiver_unusable
+    ]
+
+    # filter=bravos is required, not optional: without it the feed mixes in
+    # achievement rows AND the department filters are ignored outright.
+    raw_params: dict = {"filter": "bravos", "limit": limit, "offset": offset}
+    if days is not None:
+        raw_params["days"] = days
+    if person:
+        raw_params["search"] = person
+    # The '[]' suffix is what makes PHP read these as arrays; httpx expands a
+    # list value into repeated giver_departments[]=… params.
+    if giver_slugs:
+        raw_params["giver_departments[]"] = giver_slugs
+    if receiver_slugs:
+        raw_params["receiver_departments[]"] = receiver_slugs
+
+    params = external_params(raw_params, tool="search_bravos")
+
+    try:
+        response = await http_client.get(
+            "/activity.php",
+            params=params,
+            headers={"Authorization": authorization},
+        )
+    except httpx.TimeoutException:
+        raise TimeoutError("Request to GoProfiles API timed out.")
+    except httpx.ConnectError:
+        raise ConnectionError("Failed to connect to GoProfiles API.")
+
+    raise_for_status(response, "/activity.php")
+
+    data = BravoActivityResponse.model_validate(response.json())
+    m = data.metadata
+    summary = _filters_summary(days, person, giver_used, receiver_used)
+
+    # An empty feed is a normal outcome, never an error — name the filters that
+    # produced it, since the caller cannot otherwise tell "no bravos exist" from
+    # "one filter matched nothing".
+    if not data.results:
+        if m.total_results and offset >= m.total_results:
+            return (
+                f"No more bravos at offset {offset} — this search has "
+                f"{m.total_results} result(s) in total. Lower 'offset' to page back "
+                "through them."
+            )
+        remedies: list[str] = []
+        # Only suggest widening days when a window was actually applied —
+        # omitting days already searched all time, so that tip contradicts
+        # the filter summary and wastes a follow-up call.
+        if days is not None:
+            remedies.append(
+                "widen the window with 'days', or omit it to search all time"
+            )
+        if person:
+            remedies.append(
+                f"'{person}' is matched as a substring of 'first last', so a "
+                "misspelling returns nothing — try the last name on its own"
+            )
+        if giver_used or receiver_used:
+            remedies.append(
+                "check the department names match those in search_people results "
+                "exactly, and note that passing both giver_departments and "
+                "receiver_departments requires BOTH to match"
+            )
+        msg = f"No bravos found for: {summary}. Tell the user nothing matched"
+        if remedies:
+            msg += ", then adjust one filter at a time — " + "; ".join(remedies)
+        return msg + "."
+
+    header = (
+        f"Bravos ({m.count} of {m.total_results} total, offset {m.offset}) — "
+        f"{summary}. Newest first:"
+    )
+    entries = [
+        f"[{i}]\n{_format_bravo_activity(b)}"
+        for i, b in enumerate(data.results, start=offset + 1)
+    ]
+
+    footer = ""
+    dropped = giver_unusable + receiver_unusable
+    if dropped:
+        footer = (
+            "\n\nNote: ignored these department name(s), which contain no letters "
+            "or digits: "
+            + ", ".join(f"'{n}'" for n in dropped)
+            + ". The results are NOT filtered by them."
+        )
+
+    return header + "\n\n" + "\n\n".join(entries) + footer
+
+
 async def search_bravo_types(
     search: Annotated[
         str | None,
@@ -265,7 +640,8 @@ async def search_bravo_types(
     badge" is wrong.
 
     Returns each badge type's name, description, and a numeric 'bid' for
-    preview_bravo.
+    preview_bravo. This is the catalog of what CAN be given — for bravos that
+    have already been given, use search_bravos.
 
     After results return, ask the user for everything still missing in one
     message — which badge (unless they already named one) and what the message
