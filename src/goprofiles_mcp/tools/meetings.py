@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Annotated, Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastmcp import Context
@@ -19,6 +19,7 @@ from goprofiles_mcp.client import (
     raise_for_status,
 )
 from goprofiles_mcp.confirmations import ClaimStatus, claim, stage
+from goprofiles_mcp.tools.availability import CalendarEvent, CalendarResponse
 
 _TOOL = "schedule_meeting"
 
@@ -60,13 +61,43 @@ class ScheduleMeetingResponse(BaseModel):
     meeting_link: str | None = None
 
 
+class Attendee(BaseModel):
+    name: str = "Unknown"
+    # IANA name off their profile. Absent for plenty of real people.
+    timezone: str | None = None
+
+
 class ProviderProbe(BaseModel):
-    """Whether one calendar integration is the one this workspace runs."""
+    """Whether one calendar integration is the one this workspace runs.
+
+    Carries the attendee's calendar payload too: detecting the provider already
+    costs a read of it, so the conflict advisory below is free.
+    """
 
     label: str = ""
     invite_path: str = ""
     # ok = answered; on = enabled but this read failed; off = feature disabled
     outcome: str = "off"
+    # Populated only when outcome is ok. `linked` is False when the person has
+    # not connected their own calendar, which the provider reports in the body
+    # of a 200 rather than as a status code.
+    linked: bool = True
+    events: list[CalendarEvent] = []
+    ooo: CalendarEvent | None = None
+
+
+class ConflictCheck(BaseModel):
+    """The advisory verdict on whether the attendee is free for the slot.
+
+    `state` is deliberately three-valued. "unchecked" must never be rendered as
+    "free": the events feed only covers the rest of the attendee's current day,
+    so most future slots cannot be checked at all, and reading silence as
+    clearance is the failure mode this whole struct exists to prevent.
+    """
+
+    # conflict | clear | unchecked
+    state: str = "unchecked"
+    detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +107,20 @@ class ProviderProbe(BaseModel):
 
 def _invite_path(read_path: str) -> str:
     return f"{read_path}/schedule_meeting.php"
+
+
+def _as_ooo(raw: Any) -> CalendarEvent | None:
+    """Coerce an `ooo` payload to an event, treating PHP's empty array as absent.
+
+    Same normalization get_availability applies — PHP encodes "no OOO event" as
+    an empty array, so the field is a dict when set and a list when not.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    event = CalendarEvent.model_validate(raw)
+    if not event.start_time and not event.end_time:
+        return None
+    return event
 
 
 async def _probe_provider(
@@ -88,16 +133,23 @@ async def _probe_provider(
     — a 404 for an unlinked mailbox, a 500 from the provider — already got past
     that gate, which is all this needs to establish.
 
+    `events` and `ooo` are requested because the detection round trip has to be
+    made regardless, and they are what powers the conflict advisory. `ooo` is the
+    more useful of the two: the events feed stops at the end of the attendee's
+    current day, while the provider looks two months ahead for time off.
+
     Nothing here raises: a workspace runs one provider, so the other one's 403
     is the expected case rather than an error worth aborting the preview for. A
     bad or unscoped token has already failed the /users.php call made before
     this one, so a 403 here cannot be an auth problem in disguise.
     """
     probe = ProviderProbe(label=label, invite_path=_invite_path(read_path))
-    params = external_params({"uid": uid, "events": 1}, tool="preview_meeting")
+    params = external_params(
+        {"uid": uid, "events": 1, "ooo": 1}, tool="preview_meeting"
+    )
 
     try:
-        await api_get(read_path, params, authorization)
+        response = await api_get(read_path, params, authorization)
     except PermissionError:
         return probe
     except (LookupError, TimeoutError, ConnectionError, RuntimeError, ValueError):
@@ -105,6 +157,16 @@ async def _probe_provider(
         return probe
 
     probe.outcome = "ok"
+
+    data = CalendarResponse.model_validate(response.json())
+    # Google reports a person who has not linked their calendar in the body of a
+    # 200. Outlook never sends `status`, so only 'failure' is a signal.
+    if data.status == "failure":
+        probe.linked = False
+        return probe
+
+    probe.events = data.events
+    probe.ooo = _as_ooo(data.ooo)
     return probe
 
 
@@ -237,11 +299,15 @@ def _duration_line(minutes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _attendee_name(uid: int, authorization: str, *, tool: str) -> str | None:
-    """Confirm a uid exists and return a display name, or None if it doesn't.
+async def _attendee(uid: int, authorization: str, *, tool: str) -> Attendee | None:
+    """Confirm a uid exists and return their name and timezone, or None if not.
 
     Same two-layer check get_profile uses: /users.php 404s via LookupError, but
     it can also answer 200 with a body that carries no uid.
+
+    The timezone comes from the same payload at no extra cost, and is what places
+    the end of the attendee's day on a clock — without it the conflict advisory
+    cannot tell an unchecked slot from a checked one.
     """
     params = external_params({"uid": uid}, tool=tool)
 
@@ -256,8 +322,147 @@ async def _attendee_name(uid: int, authorization: str, *, tool: str) -> str | No
 
     first = str(raw.get("first_name") or "").strip()
     last = str(raw.get("last_name") or "").strip()
+    timezone = raw.get("timezone")
+    return Attendee(
+        name=(
+            f"{first} {last}".strip()
+            or str(raw.get("username") or "").strip()
+            or "Unknown"
+        ),
+        timezone=timezone if isinstance(timezone, str) and timezone.strip() else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conflict advisory
+# ---------------------------------------------------------------------------
+
+
+def _end_of_their_day(timezone_name: str | None) -> int | None:
+    """Epoch at which the attendee's current local day ends, or None if unknown.
+
+    The events feed is the remainder of *their* day, so a slot past this point is
+    outside what the calendar read can see at all. A profile with no timezone
+    makes the horizon unknowable, and an unknowable horizon means no slot can be
+    called checked.
+    """
+    if not timezone_name:
+        return None
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        # A stale or misspelled IANA name should degrade to "can't check", not
+        # fail the preview.
+        return None
+
+    tomorrow = datetime.now(zone) + timedelta(days=1)
+    midnight = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp())
+
+
+def _overlaps(event: CalendarEvent, slot_start: int, slot_end: int) -> bool:
+    # Strict on both ends, so a meeting that finishes exactly when this one
+    # starts is not reported as a clash.
+    return event.start_time < slot_end and event.end_time > slot_start
+
+
+def _span(event: CalendarEvent, zone: tzinfo | None) -> str:
+    display = zone or _DEFAULT_TZ
+    start = datetime.fromtimestamp(event.start_time, tz=display)
+    end = datetime.fromtimestamp(event.end_time, tz=display)
+    return f"{start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
+
+
+def _check_conflicts(
+    probe: ProviderProbe,
+    attendee: Attendee,
+    slot_start: int,
+    minutes: int,
+    zone: tzinfo | None,
+) -> ConflictCheck:
+    """Advisory only — decide whether the attendee looks busy for this slot.
+
+    Never blocks. The calendar API withholds event titles (everything is
+    "busy"), so importance cannot be judged here, and double-booking is often
+    deliberate. The user decides at the confirmation prompt; this only makes sure
+    they decide knowing what the calendar showed.
+    """
+    slot_end = slot_start + minutes * 60
+
+    if probe.outcome != "ok":
+        return ConflictCheck(
+            detail="their calendar could not be read, so conflicts are unknown"
+        )
+    if not probe.linked:
+        return ConflictCheck(
+            detail=(
+                f"they have not connected their {probe.label}, so their meetings "
+                "and time off are not visible"
+            )
+        )
+
+    # Time off first: it is the stronger objection, and the only check here that
+    # reaches beyond today — the provider looks two months ahead for it.
+    if probe.ooo is not None and _overlaps(probe.ooo, slot_start, slot_end):
+        display = zone or _DEFAULT_TZ
+        first = datetime.fromtimestamp(probe.ooo.start_time, tz=display).strftime(
+            "%d %b"
+        )
+        last = datetime.fromtimestamp(probe.ooo.end_time, tz=display).strftime("%d %b")
+        window = first if first == last else f"{first} – {last}"
+        return ConflictCheck(
+            state="conflict",
+            detail=f"they are scheduled OUT OF OFFICE then ({window})",
+        )
+
+    horizon = _end_of_their_day(attendee.timezone)
+    if horizon is None:
+        return ConflictCheck(
+            detail=(
+                "their profile has no timezone, so their meetings could not be "
+                "lined up against this slot"
+            )
+        )
+    if slot_start >= horizon:
+        # The common case for any future booking, and the one that must never
+        # read as an all-clear.
+        return ConflictCheck(
+            detail=(
+                "this slot is past the end of their current day, and only the "
+                "rest of today's meetings are visible"
+            )
+        )
+
+    clashes = [e for e in probe.events if _overlaps(e, slot_start, slot_end)]
+    if clashes:
+        busy = ", ".join(
+            "all day" if e.is_all_day else _span(e, zone)
+            for e in sorted(clashes, key=lambda e: (e.start_time, e.end_time))
+        )
+        return ConflictCheck(
+            state="conflict",
+            detail=f"they are already booked during this slot ({busy})",
+        )
+
+    return ConflictCheck(
+        state="clear", detail="nothing on their calendar clashes with this slot"
+    )
+
+
+def _conflict_lines(check: ConflictCheck) -> str:
+    """The Conflicts block for the preview, phrased so silence is never clearance."""
+    if check.state == "conflict":
+        return (
+            f"Conflicts:   WARNING — {check.detail}.\n"
+            "             This is advisory, not a block. Tell the user about the "
+            "clash and let them decide whether to book it anyway.\n"
+        )
+    if check.state == "clear":
+        return f"Conflicts:   None found — {check.detail}.\n"
     return (
-        f"{first} {last}".strip() or str(raw.get("username") or "").strip() or "Unknown"
+        f"Conflicts:   NOT CHECKED — {check.detail}.\n"
+        "             Do not tell the user this person is free. Say their "
+        "availability could not be confirmed, or ask them to check.\n"
     )
 
 
@@ -373,12 +578,19 @@ async def preview_meeting(
     exactly what schedule_meeting will create. No event is created, no calendar
     is touched, and nobody is notified.
 
-    The start time has to come from the user. This server cannot check whether
-    someone is free on a future date — get_availability only reports what is left
-    of that person's TODAY, so it can sanity-check a slot later today and nothing
-    beyond that. Never present a future slot as free, and never pick a time on
-    the user's behalf: ask them for the day and time, and put their UTC offset in
-    starts_at.
+    The start time has to come from the user. Nothing here can search for a free
+    slot on a future date — get_availability only reports what is left of that
+    person's TODAY. So never pick a time on the user's behalf: ask them for the
+    day and time, and put their UTC offset in starts_at.
+
+    The result includes a Conflicts line, which is ADVISORY and never blocks the
+    invite. It reports one of three things, and the difference matters: a warning
+    that the attendee is booked or out of office; that nothing was found in the
+    window that could be checked; or that the slot could not be checked at all —
+    which is the normal answer for any slot beyond today, because only the rest
+    of today's meetings are visible. Time off is the exception and is checked up
+    to two months ahead. Relay that line as it stands. NOT CHECKED does not mean
+    free, and must never be reported to the user as free.
 
     Ask for everything still missing in ONE message — the time, the length, the
     title, and what the invite should say. Do not ask for these one turn at a
@@ -412,7 +624,7 @@ async def preview_meeting(
     if time_error is not None:
         return f"No preview — {time_error}"
 
-    attendee = await _attendee_name(uid, authorization, tool="preview_meeting")
+    attendee = await _attendee(uid, authorization, tool="preview_meeting")
     if attendee is None:
         return (
             "No preview — no person found with that uid. Confirm the attendee "
@@ -435,6 +647,10 @@ async def preview_meeting(
             "that and suggest they set the meeting up in their calendar directly."
         )
 
+    # Advisory only, and computed from the payload the provider probe already
+    # returned — so it costs nothing and never blocks the preview.
+    conflicts = _check_conflicts(provider, attendee, epoch, duration_minutes, zone)
+
     stage(
         ctx,
         tool=_TOOL,
@@ -452,7 +668,7 @@ async def preview_meeting(
             "provider": provider.label,
         },
         confirm_args={
-            "attendee_name": attendee,
+            "attendee_name": attendee.name,
             # The resolved instant, not the string: two spellings of the same
             # moment agree, while a genuine change of time fails the diff.
             "starts_at": epoch,
@@ -464,24 +680,23 @@ async def preview_meeting(
 
     return (
         "Meeting previewed — NO invite created and nobody notified.\n\n"
-        f"With:        {attendee}\n"
+        f"With:        {attendee.name}\n"
         f"When:        {_when_line(epoch, duration_minutes, zone)}\n"
         f"Duration:    {_duration_line(duration_minutes)}\n"
         f"Calendar:    {provider.label}\n"
-        f"Title:       {title}\n"
-        "Description:\n"
+        f"Title:       {title}\n" + _conflict_lines(conflicts) + "Description:\n"
         f"{description}\n\n"
         "Check the When line against what the user actually asked for. If the "
         "relative time ('about N hours from now') looks wrong, the UTC offset was "
         "wrong — ask them for their timezone and preview again.\n\n"
         "NEXT STEP — show the user the With / When / Duration / Title / "
-        "Description above and ask them to confirm. Do not call schedule_meeting "
-        "until they explicitly say to send the invite. When they do, call "
-        "schedule_meeting with attendee_name, starts_at, duration_minutes, title, "
-        "and description copied exactly from this preview — starts_at must be the "
-        "same value you passed here, or the invite will be refused. "
-        "schedule_meeting takes no uid and no organizer: it creates the meeting "
-        "previewed here, organized by the signed-in user."
+        "Description above, relay the Conflicts line as it stands, and ask them to "
+        "confirm. Do not call schedule_meeting until they explicitly say to send "
+        "the invite. When they do, call schedule_meeting with attendee_name, "
+        "starts_at, duration_minutes, title, and description copied exactly from "
+        "this preview — starts_at must be the same value you passed here, or the "
+        "invite will be refused. schedule_meeting takes no uid and no organizer: "
+        "it creates the meeting previewed here, organized by the signed-in user."
     )
 
 
@@ -631,7 +846,7 @@ async def schedule_meeting(
     # Everything below comes from the staged payload, never from the arguments.
     sending = result.payload or {}
 
-    if await _attendee_name(sending["uid_to_meet"], authorization, tool=_TOOL) is None:
+    if await _attendee(sending["uid_to_meet"], authorization, tool=_TOOL) is None:
         return (
             "No invite created — that person no longer exists in GoProfiles. "
             "Confirm the attendee with search_people and preview a new meeting."
