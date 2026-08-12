@@ -143,3 +143,8 @@ Tool modules live under `src/goprofiles_mcp/tools/` and are registered in `src/g
 | `get_profile` | Full profile for one `uid`: bio, title, contact info, skills, interests, groups, languages, certifications. | `profiles:read` |
 | `search_celebrations` | Recent and upcoming birthdays, work anniversaries, and new hires in one merged feed, filterable by type and day window. | `profiles:read` |
 | `get_availability` | Whether one `uid` is available right now: local time, working hours, current meeting, open blocks left today, and next time off. Combines the workspace's connected calendar (Google or Outlook) with their configured working hours. | `profiles:read` |
+| `search_bravo_types` | List the Bravo badge types that can be given in the workspace. Resolves a badge name to the `bid` `preview_bravo` needs. | `bravos:read` |
+| `preview_bravo` | Resolve a recipient `uid` and badge `bid` to real names and stage a Bravo for sending. Sends nothing. | `bravos:read`, `profiles:read` |
+| `create_bravo` | Send a staged Bravo the user has explicitly approved. Sender is the authenticated user. Irreversible. | `bravos:write`, `profiles:read` |
+| `preview_meeting` | Resolve an attendee `uid`, detect the workspace's calendar provider, and stage a calendar invite. Creates nothing. | `profiles:read` |
+| `schedule_meeting` | Create a staged calendar invite the user has explicitly approved. Organizer is the authenticated user. Irreversible — the event lands on both calendars and the invite is emailed. | `profiles:write`, `profiles:read` |
