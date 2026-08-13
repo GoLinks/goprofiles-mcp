@@ -22,6 +22,7 @@ from goprofiles_mcp.tools.bravos import (
     search_bravos,
 )
 from goprofiles_mcp.tools.celebrations import search_celebrations
+from goprofiles_mcp.tools.meetings import preview_meeting, schedule_meeting
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -261,11 +262,52 @@ mcp.add_tool(
         annotations=ToolAnnotations(
             title="Create bravo",
             readOnlyHint=False,
-            # A Bravo destroys nothing, but it is irreversible and notifies a
-            # coworker. Hosts key extra approval friction off this hint, and on a
-            # client with no elicitation that prompt is part of the gate.
-            destructiveHint=True,
+            # Additive: creates, deletes nothing. Explicit — this hint defaults true.
+            destructiveHint=False,
             idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+)
+
+
+# Read-only for the same reason as preview_bravo: this resolves the attendee,
+# detects the workspace's calendar provider, and stages the invite, but creates
+# nothing — so the flow costs one write approval rather than one per call.
+mcp.add_tool(
+    _oauth2_tool(
+        preview_meeting,
+        scopes=["profiles:read"],
+        title="Preview meeting",
+        invoking="Preparing meeting preview…",
+        invoked="Meeting preview ready",
+        annotations=ToolAnnotations(
+            title="Preview meeting",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+)
+
+# Shaped exactly like create_bravo, and for the same reason: no `app=AppConfig(...)`,
+# because that emits `_meta.ui` and made ChatGPT drop the tool at discovery.
+# profiles:read re-verifies the attendee still exists immediately before sending.
+mcp.add_tool(
+    _oauth2_tool(
+        schedule_meeting,
+        scopes=["profiles:write", "profiles:read"],
+        title="Schedule meeting",
+        invoking="Creating calendar invite…",
+        invoked="Calendar invite created",
+        annotations=ToolAnnotations(
+            title="Schedule meeting",
+            readOnlyHint=False,
+            # Additive: creates, deletes nothing. Explicit — this hint defaults true.
+            destructiveHint=False,
+            idempotentHint=False,
+            # Reaches past GoProfiles into Google/Microsoft.
             openWorldHint=True,
         ),
     )

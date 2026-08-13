@@ -147,3 +147,4 @@ Tool modules live under `src/goprofiles_mcp/tools/` and are registered in `src/g
 | `search_bravo_types` | The catalog of badge types that can be given, each with the `bid` `preview_bravo` needs. | `bravos:read` |
 | `preview_bravo` | Resolves a recipient and badge and returns a preview for the user to approve. Stages the send but sends nothing. | `bravos:read`, `profiles:read` |
 | `create_bravo` | Sends the Bravo the user approved from `preview_bravo`. Irreversible and notifies the recipient. | `bravos:write`, `profiles:read` |
+| `schedule_meeting` | Create a staged calendar invite the user has explicitly approved. Organizer is the authenticated user. Irreversible — the event lands on both calendars and the invite is emailed. | `profiles:write`, `profiles:read` |

@@ -53,7 +53,7 @@ class CalendarResponse(BaseModel):
     error: str = ""
     events: list[CalendarEvent] = []
     # PHP encodes "no OOO event" as an empty array, so this is a dict when set
-    # and a list when not. Normalize through _as_event rather than typing it.
+    # and a list when not. Normalize through as_event rather than typing it.
     ooo: Any = None
 
 
@@ -81,8 +81,11 @@ class ProviderReading(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _as_event(raw: Any) -> CalendarEvent | None:
-    """Coerce an `ooo` payload to an event, treating PHP's empty array as absent."""
+def as_event(raw: Any) -> CalendarEvent | None:
+    """Coerce an `ooo` payload to an event, treating PHP's empty array as absent.
+
+    Public because schedule_meeting's conflict check parses the same payload.
+    """
     if not isinstance(raw, dict) or not raw:
         return None
     event = CalendarEvent.model_validate(raw)
@@ -390,7 +393,7 @@ async def _read_provider(
         outcome="ok",
         provider=provider,
         events=data.events,
-        ooo=_as_event(data.ooo),
+        ooo=as_event(data.ooo),
     )
 
 
