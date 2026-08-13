@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -385,18 +386,32 @@ def _person_block(attendee: Attendee, *, line_break: str) -> str:
     `line_break` is a real newline for Google's plain-text body, or the string
     "<br>" for Outlook's HTML one — every word is identical, only how the lines
     join differs.
+
+    Every field here is someone else's GoProfiles profile data, not text this
+    tool's caller wrote — so each one is HTML-escaped before it reaches the
+    invite. Both calendar APIs parse at least some HTML in the description
+    (Outlook's body is sent as contentType=HTML; Google's natively supports a
+    small subset), so an unescaped title or username lets a person's own
+    profile inject markup into every invite anyone books with them — none of
+    which the organizer typed or approved.
     """
-    header = f"👤 {attendee.name}"
+    name = html.escape(attendee.name)
+    header = f"👤 {name}"
     if attendee.title:
-        header += f", {attendee.title}"
+        header += f", {html.escape(attendee.title)}"
     lines = [header]
 
     location = _location(attendee.city, attendee.state)
     if location:
-        lines.append(f"📍 Located in {location}")
+        lines.append(f"📍 Located in {html.escape(location)}")
 
     if attendee.username:
-        url = _profile_url(attendee.username)
+        # Escaped before either use: it lands in an href attribute (needs the
+        # quote escaped so a crafted username can't close the attribute) and
+        # as visible text (needs any markup neutralized) — same string, same
+        # requirement either way.
+        username = html.escape(attendee.username)
+        url = _profile_url(username)
         lines.append(f'🔗 View profile: <a href="{url}">{url}</a>')
 
     return line_break.join(lines)
