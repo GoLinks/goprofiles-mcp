@@ -70,6 +70,12 @@ class Attendee(BaseModel):
     name: str = "Unknown"
     # IANA name off their profile. Absent for plenty of real people.
     timezone: str | None = None
+    title: str | None = None
+    city: str | None = None
+    state: str | None = None
+    # Backs the default description's profile link. Real accounts always have
+    # one; empty is only a defensive fallback.
+    username: str = ""
 
 
 class ProviderProbe(BaseModel):
@@ -290,15 +296,23 @@ def _duration_line(minutes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _optional(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 async def _attendee(uid: int, authorization: str, *, tool: str) -> Attendee | None:
-    """Confirm a uid exists and return their name and timezone, or None if not.
+    """Confirm a uid exists and return their profile, or None if they don't.
 
     Same two-layer check get_profile uses: /users.php 404s via LookupError, but
     it can also answer 200 with a body that carries no uid.
 
-    The timezone comes from the same payload at no extra cost, and is what places
-    the end of the attendee's day on a clock — without it the conflict advisory
-    cannot tell an unchecked slot from a checked one.
+    Timezone, title, city, state, and username all come from this same payload
+    at no extra cost. Timezone is what places the end of the attendee's day on a
+    clock for the conflict advisory; the rest is what the default description
+    (below) is built from.
     """
     params = external_params({"uid": uid}, tool=tool)
 
@@ -321,7 +335,89 @@ async def _attendee(uid: int, authorization: str, *, tool: str) -> Attendee | No
             or "Unknown"
         ),
         timezone=timezone if isinstance(timezone, str) and timezone.strip() else None,
+        title=_optional(raw.get("title")),
+        city=_optional(raw.get("city")),
+        state=_optional(raw.get("state")),
+        username=str(raw.get("username") or "").strip(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Default description
+# ---------------------------------------------------------------------------
+# Ports the invite body the GoProfiles web scheduler itself sends when nobody
+# customizes it (constants.js: generateUserDescription, plus the Google/Outlook
+# templates that wrap it). The organizer's own person-block is dropped: this
+# server can resolve the attendee's profile from a uid, but has no way to look
+# up the organizer's own profile from a bearer token, so the intro is passive
+# rather than naming them.
+
+
+def _duration_phrase(minutes: int) -> str:
+    """Adjectival duration for the intro line, e.g. '30 minute', '1 hour'.
+
+    The source only maps 15/30/60 ('15 minute', '30 minute', '1 hour') and
+    throws on anything else; this generalizes to whatever duration_minutes
+    allows.
+    """
+    hours, mins = divmod(minutes, 60)
+    if hours == 0:
+        return f"{mins} minute"
+    if mins == 0:
+        return f"{hours} hour"
+    return f"{hours} hour {mins} minute"
+
+
+def _location(city: str | None, state: str | None) -> str | None:
+    """City, state — either alone if only one is set. Country is not used,
+    matching the source template."""
+    parts = [p for p in (city, state) if p]
+    return ", ".join(parts) if parts else None
+
+
+def _profile_url(username: str) -> str:
+    return f"https://www.goprofiles.io/profile?username={username}"
+
+
+def _person_block(attendee: Attendee, *, line_break: str) -> str:
+    """The 👤/📍/🔗 block the web scheduler puts in every invite.
+
+    `line_break` is a real newline for Google's plain-text body, or the string
+    "<br>" for Outlook's HTML one — every word is identical, only how the lines
+    join differs.
+    """
+    header = f"👤 {attendee.name}"
+    if attendee.title:
+        header += f", {attendee.title}"
+    lines = [header]
+
+    location = _location(attendee.city, attendee.state)
+    if location:
+        lines.append(f"📍 Located in {location}")
+
+    if attendee.username:
+        url = _profile_url(attendee.username)
+        lines.append(f'🔗 View profile: <a href="{url}">{url}</a>')
+
+    return line_break.join(lines)
+
+
+def _default_description(
+    attendee: Attendee, duration_minutes: int, provider: str
+) -> str:
+    """The description preview_meeting stages when the caller doesn't supply one."""
+    intro = f"You've been invited to a {_duration_phrase(duration_minutes)} meeting"
+    footer = (
+        'Booked on <a href="https://www.goprofiles.io" target="_blank">'
+        "www.GoProfiles.io</a>"
+    )
+
+    if provider == "Outlook Calendar":
+        block = _person_block(attendee, line_break="<br>")
+        return f"<p>{intro}</p><p></p><p>{block}</p><p></p><p>{footer}</p>"
+
+    block = _person_block(attendee, line_break="\n")
+    return f"{intro}\n\n{block}\n\n{footer}"
 
 
 # ---------------------------------------------------------------------------
@@ -565,19 +661,21 @@ async def preview_meeting(
         ),
     ],
     description: Annotated[
-        str,
+        str | None,
         Field(
             description=(
                 "The invite body, shown to both people in the calendar event (max "
-                "8192 characters; simple HTML is allowed). Required by the API. Do "
-                "not invent text the user has not seen — draft it so it appears in "
-                "the preview, or ask them what the invite should say. A one-line "
-                "agenda is fine."
+                "8192 characters; simple HTML is allowed). OMIT THIS to use the "
+                "same default GoProfiles itself sends when nobody customizes it — "
+                "a short note plus the attendee's name, title, location, and "
+                "profile link. That default is the normal case; only pass a value "
+                "here when the user has actually asked for different wording, or "
+                "you've drafted something and shown it to them for approval. Do "
+                "not invent custom text on their behalf."
             ),
-            min_length=1,
             max_length=8192,
         ),
-    ],
+    ] = None,
     ctx: Context | None = None,
 ) -> str:
     """Preview a calendar invite before creating it. Creates nothing.
@@ -592,6 +690,12 @@ async def preview_meeting(
     person's TODAY. So never pick a time on the user's behalf: ask them for the
     day and time, and put their UTC offset in starts_at.
 
+    Omitting description uses the same default invite body the GoProfiles web
+    scheduler sends when nobody customizes it — the attendee's name, title,
+    location, and profile link, with a GoProfiles footer. That default is the
+    normal case; don't draft custom text unless the user has actually asked for
+    different wording.
+
     The result includes a Conflicts line, which is ADVISORY and never blocks the
     invite. It reports one of three things, and the difference matters: a warning
     that the attendee is booked or out of office; that nothing was found in the
@@ -601,10 +705,9 @@ async def preview_meeting(
     to two months ahead. Relay that line as it stands. NOT CHECKED does not mean
     free, and must never be reported to the user as free.
 
-    Ask for everything still missing in ONE message — the time, the length, the
-    title, and what the invite should say. Do not ask for these one turn at a
-    time, and do not call this tool with a title or description you invented and
-    have not shown the user.
+    Ask for everything still missing in ONE message — the time, the length, and
+    the title. Do not ask for these one turn at a time. Description needs no
+    asking unless the user wants something other than the default.
 
     Then show the user the With / When / Duration / Title / Description from the
     result and wait for them to explicitly approve it. Only after that, call
@@ -617,16 +720,10 @@ async def preview_meeting(
     authorization = get_authorization_header(ctx)
 
     title = title.strip()
-    description = description.strip()
     if not title:
         return (
             "No preview — the title is empty. Ask the user what the meeting "
             "should be called, or offer to draft a title for their review."
-        )
-    if not description:
-        return (
-            "No preview — the invite body is empty and the API requires one. Ask "
-            "the user what the invite should say, or offer to draft it."
         )
 
     epoch, zone, time_error = _resolve_start_at(starts_at)
@@ -655,6 +752,13 @@ async def preview_meeting(
             "connected, so an invite cannot be created from here. Tell the user "
             "that and suggest they set the meeting up in their calendar directly."
         )
+
+    # Omitted or blank means "use the same default GoProfiles itself sends" —
+    # built from the attendee's real profile, so it costs nothing beyond what
+    # was already fetched above.
+    description = (description or "").strip() or _default_description(
+        attendee, duration_minutes, provider.label
+    )
 
     # Advisory only, and computed from the payload the provider probe already
     # returned — so it costs nothing and never blocks the preview.
