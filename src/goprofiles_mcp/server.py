@@ -51,10 +51,9 @@ _SCOPES = [
     "bravos:read",
     "bravos:write",
 ]
-# ChatGPT domain verification for mcp.goprofiles.io — same role as golinks-mcp's
-# hardcoded token. Set via ECS env, or paste the token ChatGPT shows when verifying
-# the connector domain.
-_OPENAI_CHALLENGE_TOKEN = os.environ.get("OPENAI_APPS_CHALLENGE_TOKEN", "")
+# ChatGPT domain verification for mcp.goprofiles.io — same as golinks-mcp's
+# hardcoded token, issued by ChatGPT when verifying this connector's domain.
+_OPENAI_CHALLENGE_TOKEN = "WwKZ7-3VxG1cjkg5CHUZuTRuNXVFmG13l659w88Vixc"
 
 
 class _ScopedFunctionTool(FunctionTool):
@@ -350,12 +349,7 @@ async def health(request: Request) -> JSONResponse:
 
 
 @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
-async def openai_challenge(request: Request) -> Response:
-    """Domain verification for ChatGPT custom connectors (same pattern as golinks-mcp)."""
-    # 404 rather than an empty 200 when unset: serving a blank body reads as a
-    # successful verification with the wrong token, which is harder to diagnose.
-    if not _OPENAI_CHALLENGE_TOKEN:
-        return JSONResponse({"error": "not_found"}, status_code=404)
+async def openai_challenge(request: Request) -> PlainTextResponse:
     return PlainTextResponse(_OPENAI_CHALLENGE_TOKEN)
 
 
