@@ -30,9 +30,9 @@ REQUEST_SOURCE = "mcp"
 def external_params(extra: dict | None = None, *, tool: str) -> dict:
     """Return query params, always tagging the MCP request source & the calling tool,
     and adding externalRequest=true when the flag is set."""
-    params: dict = {"source": REQUEST_SOURCE, "mcp_tool": tool, **(extra or {})}
+    params: dict = {**(extra or {}), "source": REQUEST_SOURCE, "mcp_tool": tool}
     if GOPROFILES_EXTERNAL_REQUEST:
-        params = {"externalRequest": "true", **params}
+        params["externalRequest"] = "true"
     return params
 
 

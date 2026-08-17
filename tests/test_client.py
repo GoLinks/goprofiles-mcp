@@ -26,12 +26,14 @@ class TestExternalParams:
         assert params == {"source": "mcp", "mcp_tool": "get_profile", "uid": 5}
 
     def test_extra_does_not_override_reserved_keys(self, monkeypatch):
-        # source/mcp_tool are always the real values regardless of extra's order,
-        # since external_params spreads extra before the fixed keys would be lost
-        # if extra could clobber them.
+        # source/mcp_tool are always the real values: extra is spread first, then
+        # the reserved keys overwrite any colliding caller values.
         monkeypatch.setattr("goprofiles_mcp.client.GOPROFILES_EXTERNAL_REQUEST", False)
-        params = external_params({"source": "spoofed"}, tool="get_profile")
-        assert params["mcp_tool"] == "get_profile"
+        params = external_params(
+            {"source": "spoofed", "mcp_tool": "spoofed_tool", "uid": 5},
+            tool="get_profile",
+        )
+        assert params == {"source": "mcp", "mcp_tool": "get_profile", "uid": 5}
 
     def test_external_request_flag(self, monkeypatch):
         monkeypatch.setattr("goprofiles_mcp.client.GOPROFILES_EXTERNAL_REQUEST", True)
