@@ -25,6 +25,7 @@ from goprofiles_mcp.tools.availability import (
     CalendarResponse,
     as_event,
 )
+from goprofiles_mcp.tools.me import fetch_my_identity
 
 _TOOL = "schedule_meeting"
 
@@ -730,6 +731,10 @@ async def preview_meeting(
     result and wait for them to explicitly approve it. Only after that, call
     schedule_meeting.
 
+    Rejects a self-meeting (uid is the signed-in user) before staging anything
+    — the organizer is always the signed-in user, so the attendee has to be
+    someone else.
+
     Read-only. Requires profiles:read scope.
     """
     if ctx is None:
@@ -741,6 +746,14 @@ async def preview_meeting(
         return (
             "No preview — the title is empty. Ask the user what the meeting "
             "should be called, or offer to draft a title for their review."
+        )
+
+    me = await fetch_my_identity(authorization)
+    if me is not None and me.uid == uid:
+        return (
+            "No preview — you can't schedule a meeting with yourself; you are "
+            "always the organizer. Confirm the intended attendee with "
+            "search_people and try again."
         )
 
     epoch, zone, time_error = _resolve_start_at(starts_at)
@@ -980,6 +993,17 @@ async def schedule_meeting(
         return (
             "No invite created — that person no longer exists in GoProfiles. "
             "Confirm the attendee with search_people and preview a new meeting."
+        )
+
+    # Re-check self right before creating the event — preview_meeting's
+    # identity lookup could have failed and been skipped, or the resolved uid
+    # could otherwise have drifted since this meeting was staged.
+    me = await fetch_my_identity(authorization)
+    if me is not None and me.uid == sending["uid_to_meet"]:
+        return (
+            "No invite created — you can't schedule a meeting with yourself; "
+            "you are always the organizer. Confirm the intended attendee with "
+            "search_people and preview a new meeting."
         )
 
     # Form-encoded, not JSON: these are read through getRequestParam, which

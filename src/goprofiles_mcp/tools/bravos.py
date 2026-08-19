@@ -20,6 +20,7 @@ from goprofiles_mcp.client import (
     raise_for_status,
 )
 from goprofiles_mcp.confirmations import ClaimStatus, claim, stage
+from goprofiles_mcp.tools.me import fetch_my_identity, fetch_my_points
 
 _TOOL = "create_bravo"
 
@@ -805,6 +806,11 @@ async def preview_bravo(
     Then show the user the To / Badge / Points / Message from the result and wait
     for them to explicitly approve it. Only after that, call create_bravo.
 
+    Rejects a self-Bravo and a points amount over the sender's own giveable
+    balance before staging anything. A points amount can still be rejected by
+    create_bravo despite passing here — some workspaces cap points per Bravo
+    below the sender's balance, and that cap isn't visible to this tool.
+
     Read-only. Requires bravos:read and profiles:read scopes.
     """
     if ctx is None:
@@ -816,6 +822,13 @@ async def preview_bravo(
         return (
             "No preview — the message is empty. Ask the user what they want it to "
             "say, or offer to draft something for their review."
+        )
+
+    me = await fetch_my_identity(authorization)
+    if me is not None and me.uid == receiver_uid:
+        return (
+            "No preview — you can't give yourself a Bravo. Confirm the intended "
+            "recipient with search_people and try again."
         )
 
     badges = await _fetch_bravo_types(authorization, tool="preview_bravo")
@@ -835,6 +848,21 @@ async def preview_bravo(
         )
 
     awarded = _points(points)
+    if awarded > 0:
+        balance = await fetch_my_points(authorization)
+        if balance is None:
+            return (
+                "No preview — this workspace doesn't have reward points enabled, "
+                "so a Bravo can't include points. Preview again with points "
+                "omitted, or ask an admin to enable the rewards add-on."
+            )
+        if balance.giveable_points is not None and awarded > balance.giveable_points:
+            return (
+                f"No preview — {awarded} points exceeds your remaining giveable "
+                f"balance of {balance.giveable_points}. Preview again with a "
+                "smaller amount, or ask the user to reduce it."
+            )
+
     when, when_error = _resolve_send_at(send_at)
     if when_error is not None:
         return f"No preview — {when_error}"
@@ -1052,7 +1080,32 @@ async def create_bravo(
             "the recipient with search_people and preview a new Bravo."
         )
 
+    # Re-check self and balance right before sending — state can have changed
+    # (or preview_bravo's identity/points lookup could have failed and been
+    # skipped) since this Bravo was staged.
+    me = await fetch_my_identity(authorization)
+    if me is not None and me.uid == sending["receiver_uid"]:
+        return (
+            "No Bravo sent — you can't give yourself a Bravo. Confirm the "
+            "intended recipient with search_people and preview a new Bravo."
+        )
+
     sending_points = int(sending.get("points") or 0)
+    if sending_points > 0:
+        balance = await fetch_my_points(authorization)
+        if balance is None:
+            return (
+                "No Bravo sent — this workspace's reward points aren't "
+                "available. Preview a new Bravo with points omitted, or ask an "
+                "admin to enable the rewards add-on."
+            )
+        if balance.giveable_points is not None and sending_points > balance.giveable_points:
+            return (
+                f"No Bravo sent — {sending_points} points exceeds your "
+                f"remaining giveable balance of {balance.giveable_points}. "
+                "Preview a new Bravo with a smaller amount."
+            )
+
     # Form-encoded, not JSON: bid/comment/receiver_uids are read straight from
     # $_POST on the API side and a JSON body would drop them.
     body: dict[str, Any] = {
@@ -1088,12 +1141,17 @@ async def create_bravo(
     except (RuntimeError, ValueError):
         # The API rejects an over-cap amount with 400 and an unaffordable one
         # with 422, but masks the reason for most tenants — so name the likely
-        # cause here rather than surfacing "An error occurred".
+        # cause here rather than surfacing "An error occurred". Self-Bravo and
+        # balance are already checked above, so the two causes left are ones
+        # this tool cannot see in advance: a company-wide per-Bravo point cap
+        # (not exposed by any GoProfiles API this tool can reach), and the
+        # sender's balance changing between preview_bravo and this call.
         reasons = []
         if sending_points > 0:
             reasons.append(
-                f"the {sending_points} points may exceed the company's per-Bravo "
-                "limit or the sender's remaining balance"
+                f"the {sending_points} points may exceed this workspace's "
+                "per-Bravo cap, or the sender's balance changed since it was "
+                "staged"
             )
         if sending_when > 0:
             reasons.append("the scheduled time may no longer be in the future")

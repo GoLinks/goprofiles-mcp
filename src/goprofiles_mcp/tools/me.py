@@ -29,6 +29,37 @@ class PointsBalance(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Shared fetchers
+# ---------------------------------------------------------------------------
+# Exposed (not underscore-prefixed) so other tool modules can reuse them for
+# self-checks — e.g. bravos.py rejecting a self-Bravo, meetings.py rejecting a
+# self-meeting — without duplicating the request. Both are best-effort: a
+# None return means the lookup failed or the data isn't available, not that
+# the caller should treat it as a hard error.
+
+
+async def fetch_my_identity(authorization: str) -> WhoAmI | None:
+    params = external_params({"me": 1}, tool="get_me")
+    try:
+        response = await api_get("/users.php", params, authorization)
+    except LookupError:
+        return None
+    return WhoAmI.model_validate(response.json())
+
+
+async def fetch_my_points(authorization: str) -> PointsBalance | None:
+    params = external_params({}, tool="get_my_points")
+    try:
+        response = await api_get("/points/users.php", params, authorization)
+    except PermissionError:
+        # The rewards add-on is disabled for this workspace, or the token
+        # lacks bravos:read — either way, this is the expected common case,
+        # not an error worth aborting the caller for.
+        return None
+    return PointsBalance.model_validate(response.json())
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -50,18 +81,9 @@ async def get_me(ctx: Context | None = None) -> str:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
 
-    params = external_params({"me": 1}, tool="get_me")
-    try:
-        response = await api_get(
-            "/users.php",
-            params,
-            authorization,
-            not_found_message="Could not resolve the signed-in user from this token.",
-        )
-    except LookupError as exc:
-        return str(exc)
-
-    me = WhoAmI.model_validate(response.json())
+    me = await fetch_my_identity(authorization)
+    if me is None:
+        return "Could not resolve the signed-in user from this token."
 
     name = f"{me.first_name} {me.last_name}".strip() or me.username or "Unknown"
     lines = [
@@ -90,16 +112,10 @@ async def get_my_points(ctx: Context | None = None) -> str:
         raise PermissionError("Missing request context.")
     authorization = get_authorization_header(ctx)
 
-    params = external_params({}, tool="get_my_points")
-    try:
-        response = await api_get("/points/users.php", params, authorization)
-    except PermissionError:
-        # The rewards add-on is disabled for this workspace, or the token
-        # lacks bravos:read — either way, this is the expected common case,
-        # not an error worth aborting the tool for.
+    balance = await fetch_my_points(authorization)
+    if balance is None:
         return "Reward points aren't available for this workspace."
 
-    balance = PointsBalance.model_validate(response.json())
     if balance.giveable_points is None:
         giveable = "Unlimited"
     else:
