@@ -497,7 +497,8 @@ async def search_people(
     needs a 'uid' and you only have a name. Pass the name to 'names', then pick
     the uid from the results — use title/department/location to disambiguate when
     several people match, and ask the user which one they meant rather than
-    guessing between two plausible matches.
+    guessing between two plausible matches. For the signed-in user's own uid,
+    use get_me instead — this tool has no notion of "me" and cannot resolve it.
 
     The 'uid' is an internal id for calling get_profile and similar tools. Never
     show, read aloud, or otherwise expose 'uid' values to the user; refer to
@@ -616,9 +617,10 @@ async def get_profile(
     included in the response text.
 
     Use after search_people when you need the full profile for a resolved uid.
-    This tool cannot look anyone up by name and has no notion of "me" or the
-    signed-in user: search_people is the only way to turn a name into a uid, and
-    the uid must come from this chat, never from memory or another conversation.
+    This tool cannot look anyone up by name: search_people is the only way to
+    turn another person's name into a uid, and the uid must come from this
+    chat, never from memory or another conversation. For the signed-in user's
+    own uid, use get_me instead of search_people.
 
     Never show the uid to the user. Read-only. Requires profiles:read scope.
     """
@@ -634,8 +636,8 @@ async def get_profile(
             "No profile fetched — get_profile requires a uid and has no default. "
             "Call search_people with the person's name to get their uid, then call "
             "get_profile again with it. If the user asked about their own profile, "
-            "ask them for their name first: this server cannot identify the "
-            "signed-in user."
+            "call get_me first to resolve the signed-in user's uid, then call "
+            "get_profile again with it."
         )
 
     not_found = (

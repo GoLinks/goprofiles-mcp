@@ -348,10 +348,12 @@ async def _attendee(uid: int, authorization: str, *, tool: str) -> Attendee | No
 # ---------------------------------------------------------------------------
 # Ports the invite body the GoProfiles web scheduler itself sends when nobody
 # customizes it (constants.js: generateUserDescription, plus the Google/Outlook
-# templates that wrap it). The organizer's own person-block is dropped: this
-# server can resolve the attendee's profile from a uid, but has no way to look
-# up the organizer's own profile from a bearer token, so the intro is passive
-# rather than naming them.
+# templates that wrap it). The organizer's own person-block is dropped: get_me
+# (tools/me.py) can now resolve the organizer's own identity from a bearer
+# token, but naming them in the invite intro is a deliberate follow-up, not
+# done here — this needs no new scope (profiles:read already covers get_me),
+# it's just not wired up yet. The organizer's timezone is a separate, still
+# unresolved gap (see _DEFAULT_TZ below): get_me does not return one.
 
 
 def _duration_phrase(minutes: int) -> str:

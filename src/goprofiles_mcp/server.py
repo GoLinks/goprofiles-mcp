@@ -22,6 +22,7 @@ from goprofiles_mcp.tools.bravos import (
     search_bravos,
 )
 from goprofiles_mcp.tools.celebrations import search_celebrations
+from goprofiles_mcp.tools.me import get_me, get_my_points
 from goprofiles_mcp.tools.meetings import preview_meeting, schedule_meeting
 from goprofiles_mcp.tools.people import get_profile, search_people
 
@@ -125,6 +126,23 @@ mcp = fastmcp.FastMCP("GoProfiles")
 
 mcp.add_tool(
     _oauth2_tool(
+        get_me,
+        scopes=["profiles:read"],
+        title="Get me",
+        invoking="Loading your profile…",
+        invoked="Profile ready",
+        annotations=ToolAnnotations(
+            title="Get me",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
         search_people,
         scopes=["search:read"],
         title="Search people",
@@ -218,6 +236,23 @@ mcp.add_tool(
         invoked="Bravo types ready",
         annotations=ToolAnnotations(
             title="Search bravo types",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        get_my_points,
+        scopes=["bravos:read"],
+        title="Get my points",
+        invoking="Loading your points…",
+        invoked="Points ready",
+        annotations=ToolAnnotations(
+            title="Get my points",
             readOnlyHint=True,
             destructiveHint=False,
             idempotentHint=True,
