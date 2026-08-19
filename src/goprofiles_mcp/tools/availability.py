@@ -422,10 +422,10 @@ async def get_availability(
         Field(
             description=(
                 "Numeric user id of the person, from a search_people call in THIS "
-                "chat. There is no default and no 'current user' — without a uid "
-                "this tool returns nothing, so run search_people first instead of "
-                "calling with no arguments. Pass the uid only — never show it to "
-                "the user."
+                "chat (or from get_me for the signed-in user's own uid). There is "
+                "no default — without a uid this tool returns nothing, so resolve "
+                "one first instead of calling with no arguments. Pass the uid "
+                "only — never show it to the user."
             ),
             ge=1,
         ),
@@ -463,8 +463,8 @@ async def get_availability(
             "No availability fetched — get_availability requires a uid and has no "
             "default. Call search_people with the person's name to get their uid, "
             "then call get_availability again with it. If the user asked about "
-            "their own availability, ask them for their name first: this server "
-            "cannot identify the signed-in user."
+            "their own availability, call get_me first to resolve the signed-in "
+            "user's uid, then call get_availability again with it."
         )
 
     not_found = (
