@@ -24,6 +24,7 @@ from goprofiles_mcp.tools.bravos import (
 from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.meetings import preview_meeting, schedule_meeting
 from goprofiles_mcp.tools.people import get_profile, search_people
+from goprofiles_mcp.tools.profile import preview_update_my_profile, update_my_profile
 
 # OAuth discovery env vars with production defaults
 _ISSUER = os.environ.get("GOPROFILES_OAUTH_ISSUER", "https://www.goprofiles.io")
@@ -308,6 +309,44 @@ mcp.add_tool(
             idempotentHint=False,
             # Reaches past GoProfiles into Google/Microsoft.
             openWorldHint=True,
+        ),
+    )
+)
+
+# Read-only for the same reason as preview_bravo: stages the profile write but
+# mutates nothing, so the flow costs one write approval rather than one per call.
+mcp.add_tool(
+    _oauth2_tool(
+        preview_update_my_profile,
+        scopes=["profiles:read"],
+        title="Preview update my profile",
+        invoking="Preparing profile update preview…",
+        invoked="Profile update preview ready",
+        annotations=ToolAnnotations(
+            title="Preview update my profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+)
+
+# May delete skills/certs/languages — leave destructiveHint at its true default
+# by setting it explicitly. No AppConfig/_meta.ui (same ChatGPT discovery issue).
+mcp.add_tool(
+    _oauth2_tool(
+        update_my_profile,
+        scopes=["profiles:write"],
+        title="Update my profile",
+        invoking="Updating profile…",
+        invoked="Profile update finished",
+        annotations=ToolAnnotations(
+            title="Update my profile",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
         ),
     )
 )

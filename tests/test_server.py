@@ -200,5 +200,7 @@ async def test_all_expected_tools_are_registered():
         "create_bravo",
         "preview_meeting",
         "schedule_meeting",
+        "preview_update_my_profile",
+        "update_my_profile",
     }
-    assert len(tools) == 10
+    assert len(tools) == 12

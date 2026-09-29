@@ -35,7 +35,9 @@ from goprofiles_mcp.tools.meetings import (
 
 # Well within a year of "today" and never in the past, regardless of when the
 # suite runs.
-FUTURE_ISO = "2026-09-01T14:00:00+00:00"
+FUTURE_ISO = (datetime.now(UTC) + timedelta(days=30)).strftime(
+    "%Y-%m-%dT14:00:00+00:00"
+)
 
 
 def _clear_pending():
@@ -159,12 +161,13 @@ class TestResolveStartAt:
         assert "more than a year away" in error
 
     def test_valid_future_time_resolves_epoch_and_offset(self):
-        epoch, zone, error = _resolve_start_at("2026-09-01T14:00:00-07:00")
+        future = (datetime.now(UTC) + timedelta(days=30)).strftime(
+            "%Y-%m-%dT14:00:00-07:00"
+        )
+        epoch, zone, error = _resolve_start_at(future)
         assert error is None
         assert zone.utcoffset(None) == timedelta(hours=-7)
-        assert epoch == int(
-            datetime.fromisoformat("2026-09-01T14:00:00-07:00").timestamp()
-        )
+        assert epoch == int(datetime.fromisoformat(future).timestamp())
 
 
 class TestWhenLine:
