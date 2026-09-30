@@ -463,8 +463,8 @@ async def get_availability(
             "No availability fetched — get_availability requires a uid and has no "
             "default. Call search_people with the person's name to get their uid, "
             "then call get_availability again with it. If the user asked about "
-            "their own availability, ask them for their name first: this server "
-            "cannot identify the signed-in user."
+            "their own availability, call get_my_profile to find their name, then "
+            "search_people for their uid."
         )
 
     not_found = (
