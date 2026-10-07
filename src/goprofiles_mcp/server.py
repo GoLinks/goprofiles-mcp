@@ -23,6 +23,11 @@ from goprofiles_mcp.tools.bravos import (
 )
 from goprofiles_mcp.tools.celebrations import search_celebrations
 from goprofiles_mcp.tools.meetings import preview_meeting, schedule_meeting
+from goprofiles_mcp.tools.my_profile import (
+    get_my_profile,
+    preview_my_profile_update,
+    update_my_profile,
+)
 from goprofiles_mcp.tools.people import get_profile, search_people
 
 # OAuth discovery env vars with production defaults
@@ -308,6 +313,58 @@ mcp.add_tool(
             idempotentHint=False,
             # Reaches past GoProfiles into Google/Microsoft.
             openWorldHint=True,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        get_my_profile,
+        scopes=["profiles:read"],
+        title="Get my profile",
+        invoking="Loading your profile…",
+        invoked="Your profile is ready",
+        annotations=ToolAnnotations(
+            title="Get my profile",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
+)
+
+# Read-only: it stages the update but saves nothing, so the flow costs one write approval rather than one per call.
+mcp.add_tool(
+    _oauth2_tool(
+        preview_my_profile_update,
+        scopes=["profiles:read"],
+        title="Preview my profile update",
+        invoking="Preparing profile update preview…",
+        invoked="Profile update preview ready",
+        annotations=ToolAnnotations(
+            title="Preview my profile update",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
+)
+
+mcp.add_tool(
+    _oauth2_tool(
+        update_my_profile,
+        scopes=["profiles:write", "profiles:read"],
+        title="Update my profile",
+        invoking="Saving your profile…",
+        invoked="Profile update finished",
+        annotations=ToolAnnotations(
+            title="Update my profile",
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
         ),
     )
 )
